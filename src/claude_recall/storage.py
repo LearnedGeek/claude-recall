@@ -12,14 +12,15 @@ Does NOT own:
 - Query logic (that's search.py)
 """
 
+from __future__ import annotations
+
+import os
 import sqlite3
+import sys
 from pathlib import Path
 
 SCHEMA_VERSION = 1
 
-# DDL — see docs/PLAN.md section 5.1 for annotations.
-# TODO(implementer): move this to a .sql file and read at runtime, or keep inline.
-# Decision deferred; both are acceptable.
 SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS sessions (
     session_id       TEXT PRIMARY KEY,
@@ -63,11 +64,13 @@ CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
 END;
 
 CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.msg_id, old.content);
+    INSERT INTO messages_fts(messages_fts, rowid, content)
+        VALUES ('delete', old.msg_id, old.content);
 END;
 
 CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.msg_id, old.content);
+    INSERT INTO messages_fts(messages_fts, rowid, content)
+        VALUES ('delete', old.msg_id, old.content);
     INSERT INTO messages_fts(rowid, content) VALUES (new.msg_id, new.content);
 END;
 
@@ -77,25 +80,68 @@ CREATE TABLE IF NOT EXISTS schema_version (
 """
 
 
+class StorageError(RuntimeError):
+    """Raised when the database cannot be opened or initialized."""
+
+
 def open_db(path: Path) -> sqlite3.Connection:
     """Open a connection, ensure schema is current, return connection.
 
-    TODO(implementer):
-    - Create parent directory if missing
-    - Check FTS5 availability via sqlite_compile_options() or probe query
-    - Execute SCHEMA_DDL
-    - Run migrations based on schema_version
-    - Set 0600 permissions on the db file (Unix)
-    - Enable foreign keys PRAGMA
-    - Return a Connection with row_factory = sqlite3.Row
+    Creates parent directories as needed. Enables foreign keys, installs the
+    schema, records the schema version, and on Unix hardens the file mode to
+    0600.
     """
-    raise NotImplementedError("See docs/PLAN.md section 10 for implementation order.")
+    path = Path(path)
+    is_new = not path.exists()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    conn = sqlite3.connect(str(path))
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+
+    if not fts5_available(conn):
+        conn.close()
+        raise StorageError(
+            "FTS5 is not available in this SQLite build. "
+            "Upgrade SQLite or install a Python build with FTS5 support."
+        )
+
+    _install_schema(conn)
+
+    if is_new and sys.platform != "win32":
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+
+    return conn
 
 
 def fts5_available(conn: sqlite3.Connection) -> bool:
     """Check whether this SQLite build supports FTS5.
 
-    TODO(implementer): attempt to CREATE VIRTUAL TABLE ... USING fts5 in a savepoint
-    and roll back; or query sqlite_compile_options. Return bool.
+    Attempts to create an FTS5 virtual table in a temporary scope and rolls it
+    back. Returns True on success.
     """
-    raise NotImplementedError
+    try:
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS _fts5_probe USING fts5(x)"
+        )
+        conn.execute("DROP TABLE IF EXISTS _fts5_probe")
+        return True
+    except sqlite3.OperationalError:
+        return False
+
+
+def _install_schema(conn: sqlite3.Connection) -> None:
+    """Install DDL and record current schema version.
+
+    This is the MVP migration primitive. Future versions add conditional
+    ALTER TABLE steps here, gated on the current schema_version value.
+    """
+    conn.executescript(SCHEMA_DDL)
+    conn.execute(
+        "INSERT OR IGNORE INTO schema_version(version) VALUES (?)",
+        (SCHEMA_VERSION,),
+    )
+    conn.commit()
