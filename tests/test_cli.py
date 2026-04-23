@@ -339,6 +339,74 @@ def test_init_hooks_uses_native_binary_when_present(tmp_path, monkeypatch):
     assert any("claude-recall-hook.exe" in c for c in ups_cmds)
 
 
+def test_init_hooks_force_wipes_managed_events(tmp_path):
+    """Issue #4 regression: --force must replace SessionStart + UserPromptSubmit
+    wholesale. A pre-existing entry pointing at an old install path (e.g., a
+    site-packages path from a manual pre-v0.4.1 wiring) must not survive the
+    upgrade. Other hook events stay untouched."""
+    project_root = tmp_path / "proj"
+    (project_root / ".claude").mkdir(parents=True)
+
+    stale = {
+        "hooks": {
+            "PreToolUse": [{"command": "/user/pre-tool-use.sh"}],
+            "PostToolUse": [{"command": "/user/post-tool-use.sh"}],
+            "SessionStart": [{"command": "/stale/site-packages/session_start.ps1", "matcher": "startup"}],
+            "UserPromptSubmit": [
+                # Mimics OC's manual wiring to a site-packages path before v0.4.1.
+                {"command": "C:/stale/site-packages/native/claude-recall-hook.exe"},
+            ],
+        }
+    }
+    settings_path = project_root / ".claude" / "settings.json"
+    settings_path.write_text(json.dumps(stale), encoding="utf-8")
+
+    code = cli.main(["init-hooks", "--project-root", str(project_root), "--force"])
+    assert code == 0
+
+    merged = json.loads(settings_path.read_text(encoding="utf-8"))
+
+    # Events we don't manage are preserved.
+    assert merged["hooks"]["PreToolUse"] == [{"command": "/user/pre-tool-use.sh"}]
+    assert merged["hooks"]["PostToolUse"] == [{"command": "/user/post-tool-use.sh"}]
+
+    # Events we DO manage should have exactly one entry each (the generated one).
+    assert len(merged["hooks"]["SessionStart"]) == 1
+    assert "stale" not in merged["hooks"]["SessionStart"][0]["command"]
+
+    assert len(merged["hooks"]["UserPromptSubmit"]) == 1
+    assert "stale" not in merged["hooks"]["UserPromptSubmit"][0]["command"]
+
+    # .bak still written as a safety net.
+    assert (project_root / ".claude" / "settings.json.bak").exists()
+
+
+def test_init_hooks_without_force_preserves_pre_existing_user_hooks(tmp_path):
+    """Without --force, pre-existing user entries under SessionStart /
+    UserPromptSubmit survive alongside the generated ones. This is the v0.3.x
+    behavior kept intentionally for users who want to layer hooks rather than
+    replace them."""
+    project_root = tmp_path / "proj"
+    (project_root / ".claude").mkdir(parents=True)
+    existing = {
+        "hooks": {
+            "UserPromptSubmit": [{"command": "/user/pre-existing-prompt-hook.sh"}],
+        }
+    }
+    (project_root / ".claude" / "settings.json").write_text(
+        json.dumps(existing), encoding="utf-8"
+    )
+    code = cli.main(["init-hooks", "--project-root", str(project_root)])
+    assert code == 0
+
+    merged = json.loads(
+        (project_root / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    cmds = [e["command"] for e in merged["hooks"]["UserPromptSubmit"]]
+    assert "/user/pre-existing-prompt-hook.sh" in cmds
+    assert len(cmds) == 2  # pre-existing + generated
+
+
 def test_init_hooks_fails_cleanly_when_wheel_missing_sources(
     tmp_path, monkeypatch, capsys
 ):

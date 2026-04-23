@@ -2,6 +2,48 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.4.2 — 2026-04-23
+
+Bugfix for [issue #4](https://github.com/LearnedGeek/claude-recall/issues/4):
+`init-hooks --force` used to merge into existing `settings.json` instead of
+overwriting the managed hook events. Users who manually wired a stale path
+around v0.4.0's crash (issue #3), then ran v0.4.1's documented upgrade
+command, ended up with two `UserPromptSubmit` entries — both pointing at
+the same binary via different filesystem paths — and the hook firing twice
+per prompt.
+
+### Fixed
+
+- `--force` now wipes `hooks.SessionStart` and `hooks.UserPromptSubmit`
+  before re-merging, matching the release-note contract
+  ("overwrite ... and save the hand-edit to `settings.json.bak`"). Hook
+  events the tool doesn't manage (`PreToolUse`, `PostToolUse`, etc.) are
+  always preserved, regardless of `--force`.
+- Without `--force` the merge behavior is unchanged — v0.3.x-era users
+  layering their own hook entries under our managed events keep working.
+- Summary line adjusted: `--force` says "rewritten into settings.json",
+  merge path says "merged into settings.json".
+
+### Tests
+
+- 2 new CLI regression tests cover: (a) `--force` with stale entries
+  under managed events + user entries under non-managed events produces
+  exactly one entry per managed event and preserves the non-managed ones,
+  (b) non-force preserves pre-existing user entries under managed events.
+  Full suite: 144 Python + 62 C# = 206 passing.
+
+### Upgrading from v0.4.0 or v0.4.1
+
+```bash
+pip install --upgrade "claude_recall[embeddings] @ https://github.com/LearnedGeek/claude-recall/releases/download/v0.4.2/claude_recall-0.4.2-py3-none-win_amd64.whl"
+claude-recall init-hooks --force
+```
+
+If you already have a duplicate-entry `settings.json` from the v0.4.1
+upgrade, `init-hooks --force` on v0.4.2 cleans it up: the pre-existing
+file is backed up to `settings.json.bak`, and the new `settings.json`
+contains exactly one entry per managed hook event.
+
 ## v0.4.1 — 2026-04-23
 
 Bugfix for [issue #3](https://github.com/LearnedGeek/claude-recall/issues/3):

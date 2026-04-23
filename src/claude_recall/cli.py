@@ -926,6 +926,15 @@ def _cmd_init_hooks(args: argparse.Namespace, cfg: Config) -> int:
         settings = {}
 
     hooks_block = settings.setdefault("hooks", {})
+
+    # --force wipes the two events claude-recall manages before re-merging,
+    # so upgrades don't accumulate stale command entries pointing at old
+    # install paths (issue #4). Hook events we don't manage (PreToolUse,
+    # PostToolUse, etc.) are always preserved.
+    if args.force:
+        for event in ("SessionStart", "UserPromptSubmit"):
+            hooks_block.pop(event, None)
+
     if session_start_cmd is not None:
         _merge_hook(hooks_block, "SessionStart", session_start_cmd, matcher="startup|resume")
     _merge_hook(hooks_block, "UserPromptSubmit", on_prompt_cmd, matcher=None)
@@ -937,7 +946,8 @@ def _cmd_init_hooks(args: argparse.Namespace, cfg: Config) -> int:
         __version__ + "\n", encoding="utf-8"
     )
     print(f"claude-recall: hooks installed at {hooks_dir} (v{__version__})")
-    print(f"claude-recall: settings merged into {settings_path}")
+    verb = "rewritten" if args.force else "merged"
+    print(f"claude-recall: settings {verb} into {settings_path}")
     print("claude-recall: run `claude-recall index` once to build the index.")
     return 0
 
