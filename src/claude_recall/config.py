@@ -62,11 +62,50 @@ def default_db_path() -> Path:
 def load_config(path: Path | None = None) -> Config:
     """Load config from TOML file, falling back to defaults.
 
-    TODO(implementer):
-    - If path is None, use default_config_path()
-    - If file doesn't exist, return Config() (all defaults)
-    - Parse TOML via tomllib; apply to Config dataclass
-    - Expand ~ in any path fields
-    - Return Config instance
+    Missing file → defaults silently. Full TOML parsing + precedence is
+    implemented in the dedicated config step.
     """
-    raise NotImplementedError("See docs/PLAN.md section 8 for schema.")
+    if path is None:
+        path = default_config_path()
+    if not path.exists():
+        return Config()
+    return _load_toml(path)
+
+
+def _load_toml(path: Path) -> Config:
+    with open(path, "rb") as fh:
+        data = tomllib.load(fh)
+
+    cfg = Config()
+    archive_root = _dig(data, "archive", "root")
+    if isinstance(archive_root, str):
+        cfg.archive_root = Path(archive_root).expanduser()
+
+    db_path = _dig(data, "database", "path")
+    if isinstance(db_path, str):
+        cfg.db_path = Path(db_path).expanduser()
+
+    for field_name in ("hook_threshold", "hook_limit", "max_injected_tokens", "hook_days"):
+        val = _dig(data, "search", field_name)
+        if val is not None:
+            setattr(cfg.search, field_name, val)
+
+    tool_blocks = _dig(data, "indexing", "index_tool_blocks")
+    if tool_blocks is not None:
+        cfg.indexing.index_tool_blocks = bool(tool_blocks)
+
+    for field_name in ("enabled", "ollama_base_url", "model"):
+        val = _dig(data, "embeddings", field_name)
+        if val is not None:
+            setattr(cfg.embeddings, field_name, val)
+
+    return cfg
+
+
+def _dig(data: dict, *path: str):
+    node = data
+    for key in path:
+        if not isinstance(node, dict) or key not in node:
+            return None
+        node = node[key]
+    return node
