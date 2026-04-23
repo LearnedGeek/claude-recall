@@ -755,14 +755,17 @@ tests/
 
 ---
 
-## 17. Open questions for review
+## 17. Design decisions (resolved April 23, 2026)
 
-Questions the implementing agent should raise to the project owner before making an irreversible choice:
+All four open questions from an earlier draft of this plan have been answered by the project owner:
 
-1. **Keyword extraction (v0.2) approach.** POS-tagging via `spacy` or simpler regex-based noun chunking? `spacy` adds a meaningful dependency. Lightweight alternatives: `yake`, `rake-nltk`, or pure-stdlib regex + stopword filtering. Default recommendation: stdlib + stopword filter, unless initial testing shows too many low-quality hook queries.
-2. **Whether to index tool_use / tool_result blocks by default.** Config flag defaults to `false`; revisit if users complain about missing context from Bash/Read calls they remember.
-3. **GitHub org.** Publish under `LearnedGeek/claude-recall` or personal `mcarthey/claude-recall`? Aligns with LearnedGeek branding — recommend `LearnedGeek/claude-recall`. Confirm before `git remote add`.
-4. **Analytics on usage.** Add opt-in telemetry (anonymized query count, hook firing rate) to understand real-world use? Recommend **no** for MVP, yes-with-explicit-opt-in for v1.0.
+1. **Keyword extraction for v0.2 — choose quality over efficiency.** Use a capable NLP library (spacy with a small model, or equivalent) rather than a stdlib regex + stopword filter. The underlying principle the project owner named: *"I prefer quality over efficiency if that's a trade-off we're making. It's important to have correct information when working on long-running projects."* This principle extends beyond keyword extraction — where future tradeoffs between recall quality and install/runtime cost appear, the MVP's bias is toward recall quality. Implementer should pick spacy unless a concrete reason emerges to prefer an alternative during v0.2 scoping.
+
+2. **Tool block indexing stays off by default.** Config flag defaults to `false`. Project owner's note: *"I think most tool calls don't have a lot of context so that's ok, but I'll defer as we use it."* Revisit during v0.2 or v0.3 if real-world use surfaces cases where users say *"I remember we did something with a bash command"* and search misses because tool blocks weren't indexed. Quality-over-efficiency principle would argue for turning this on later unless there's evidence it introduces more noise than signal.
+
+3. **GitHub org — `LearnedGeek/claude-recall`.** Confirmed. Python package name `claude-recall` (hyphen, per PyPI convention), import name `claude_recall` (underscore, per Python module convention).
+
+4. **Analytics — no telemetry in MVP.** Revisit opt-in telemetry at v1.0 or later. Project owner confirmed the recommendation: *"opt-in is off now is the correct choice."*
 
 ---
 
