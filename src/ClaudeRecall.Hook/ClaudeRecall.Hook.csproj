@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>ClaudeRecall.Hook</RootNamespace>
+    <AssemblyName>claude-recall-hook</AssemblyName>
+    <Version>0.4.0</Version>
+
+    <!-- NativeAOT: tiny single-file binary, no .NET runtime install needed. -->
+    <PublishAot>true</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <OptimizationPreference>Size</OptimizationPreference>
+    <StripSymbols>true</StripSymbols>
+    <IlcGenerateStackTraceData>false</IlcGenerateStackTraceData>
+
+    <!-- Source-generated JSON for AOT. Reflection-based serialization would break. -->
+    <JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>
+
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <LangVersion>latest</LangVersion>
+
+    <!-- Tomlyn produces AOT trim warnings in code paths we don't exercise
+         (our usage is TomlTable dictionary-style only). Suppress the
+         aggregate IL2104 warning so the Release/NativeAOT build succeeds;
+         if our TOML usage expands, revisit. -->
+    <NoWarn>$(NoWarn);IL2104</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.1" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.10" />
+    <PackageReference Include="Tomlyn" Version="0.19.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="ClaudeRecall.Hook.Tests" />
+  </ItemGroup>
+
+</Project>

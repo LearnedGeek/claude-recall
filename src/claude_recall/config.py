@@ -34,10 +34,12 @@ class EmbeddingsConfig:
     rerank_pool_size: int = 50
     request_timeout_seconds: float = 10.0
     batch_size: int = 32
-    # Hook uses --semantic when true AND enabled is true. Default false for
-    # v0.3 because semantic-on hook latency is ~700ms (over the PLAN §7.3
-    # 500ms budget). v0.4 C# hook binary removes the budget concern.
-    use_in_hook: bool = False
+    # Hook uses --semantic when true AND enabled is true.
+    # v0.4: default flipped to true — the C# NativeAOT hook binary brings
+    # semantic-on hook latency to ~30-80ms (well under PLAN §7.3's 500ms
+    # budget). If you're still on the Python hook path (no binary in wheel,
+    # or pre-v0.4 install), flip this back to false to stay under budget.
+    use_in_hook: bool = True
 
 
 @dataclass

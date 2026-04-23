@@ -299,6 +299,46 @@ def test_search_cli_flag_overrides_from_config(tmp_path, capsys):
     assert payload["returned"] <= 1
 
 
+def test_init_hooks_uses_native_binary_when_present(tmp_path, monkeypatch):
+    """On Windows when src/claude_recall/native/claude-recall-hook.exe exists,
+    init-hooks registers it directly as the UserPromptSubmit command and
+    copies it into .claude/hooks/, dropping the shell-wrapper on_prompt.ps1."""
+    import sys as _sys
+    if _sys.platform != "win32":
+        pytest.skip("binary-aware init-hooks check is win-x64 only for v0.4")
+
+    from claude_recall import cli as _cli
+
+    # Fake a bundled binary by pointing NATIVE_SRC_DIR at a tmp dir with a
+    # stub exe. We don't need a real exe for this test — init-hooks just
+    # copies bytes.
+    fake_native = tmp_path / "fake_native"
+    fake_native.mkdir()
+    (fake_native / "claude-recall-hook.exe").write_bytes(b"MZ stub")
+    (fake_native / "e_sqlite3.dll").write_bytes(b"PE stub")
+    monkeypatch.setattr(_cli, "NATIVE_SRC_DIR", fake_native)
+
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    code = cli.main(["init-hooks", "--project-root", str(project_root)])
+    assert code == 0
+
+    hooks_dir = project_root / ".claude" / "hooks"
+    # Binary copied
+    assert (hooks_dir / "claude-recall-hook.exe").exists()
+    assert (hooks_dir / "e_sqlite3.dll").exists()
+    # Shell wrapper for on_prompt is NOT written
+    assert not (hooks_dir / "on_prompt.ps1").exists()
+    # SessionStart shell wrapper IS still written
+    assert (hooks_dir / "session_start.ps1").exists()
+
+    settings = json.loads(
+        (project_root / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    ups_cmds = [e["command"] for e in settings["hooks"]["UserPromptSubmit"]]
+    assert any("claude-recall-hook.exe" in c for c in ups_cmds)
+
+
 def test_init_hooks_writes_version_stamp(tmp_path):
     """init-hooks writes the installed package version alongside the scripts."""
     from claude_recall import __version__ as pkg_version

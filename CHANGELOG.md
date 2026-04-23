@@ -2,6 +2,82 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.4.0 — 2026-04-23
+
+Compiled C# hook binary replaces the Python-CLI-based UserPromptSubmit path
+per [docs/HOOK-BINARY-PLAN.md](docs/HOOK-BINARY-PLAN.md). Semantic-in-hook
+now ships as the default because the 500ms budget constraint is gone.
+
+**Measured hook latency on warm-Ollama localhost:**
+
+| Hook | v0.3 (Python) | v0.4 (C# NativeAOT) | Speedup |
+|---|---|---|---|
+| FTS5 only | ~125ms | ~17ms | 7× |
+| Semantic-on | ~685ms | **~80ms** | **8×** |
+
+### Added
+
+- `src/ClaudeRecall.Hook/` — C# NativeAOT project (~1,000 LOC) with
+  `Projects`, `Keywords`, `Config`, `Storage`, `Embeddings`, `Vectors`,
+  `Rerank`, and `Program` modules. 62 xUnit tests with parallel structure
+  to the Python tests they mirror.
+- `src/ClaudeRecall.Hook.Tests/` — xUnit test project.
+- `src/ClaudeRecall.sln` — solution file covering both C# projects.
+- `src/claude_recall/native/` — package-data slot for the built binary.
+  GH Actions win-x64 wheels ship it; pure-Python wheels fall back to the
+  v0.3 shell-hook path.
+- `build-hook.ps1` — local dev build script. Auto-detects MSVC BuildTools
+  and sets PATH/INCLUDE/LIB for the PowerShell session.
+- `.github/workflows/build-wheels.yml` — tag-triggered wheel build. Two
+  wheels per release: `win_amd64` (binary bundled) + `py3-none-any`
+  (fallback).
+- `CONTRIBUTING.md` — setup notes, including MSVC requirement for C# work.
+- `--semantic-from-config` in `search` (v0.3 had this; formalized and
+  used as the hook-side toggle).
+
+### Changed
+
+- `claude-recall init-hooks` detects the bundled binary on Windows wheels
+  and registers `claude-recall-hook.exe` directly in `settings.json` as
+  the UserPromptSubmit command — no shell wrapper. SessionStart stays
+  as a shell script (not latency-critical).
+- `[embeddings].use_in_hook` default flipped from `false` → `true`. The
+  v0.3 workaround is now the exception; users on non-Windows wheels (pure
+  Python, slow hook) should flip it back to `false`.
+
+### Binary details
+
+- **Size**: 6.6MB `claude-recall-hook.exe` + 1.7MB `e_sqlite3.dll`
+  (bundled SQLite with FTS5 enabled). Self-contained — no .NET runtime
+  install needed on the end user's machine.
+- **Trust surface**: Microsoft.Data.Sqlite, SQLitePCLRaw.bundle_e_sqlite3,
+  Tomlyn. All pinned.
+- **Hook failsafe**: any unhandled exception in the binary is caught and
+  `{}` + exit 0 is emitted. Same contract as the Python hook.
+- **Byte-identical output**: validated by a cross-runtime test that
+  invokes both paths on the same fixture and diffs the `additionalContext`
+  field.
+
+### Distribution
+
+- Installing on Windows x64: `pip install claude-recall` gets the wheel
+  with the binary bundled. `init-hooks` drops it into `.claude/hooks/`
+  and registers it. No additional setup.
+- Installing on macOS/Linux: `pip install claude-recall` gets the
+  pure-Python wheel. `init-hooks` wires the v0.3 shell hook. Users who
+  want the compiled binary can build it locally via `build-hook.ps1` — or
+  wait for v0.4.1 when CI adds those platform builds.
+- First PyPI publish still gated on v0.5 (PLAN §13).
+
+### Tests
+
+Python: 139 passing, 1 live-Ollama skipped. C#: 62 passing. Combined 201.
+
+### Deviations from plan
+
+None substantive. Every decision in `docs/HOOK-BINARY-PLAN.md §15` held up
+through implementation.
+
 ## v0.3.0 — 2026-04-23
 
 Optional semantic retrieval layer per [docs/EMBEDDINGS-PLAN.md](docs/EMBEDDINGS-PLAN.md).

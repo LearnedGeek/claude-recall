@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="ClaudeRecall.Hook.Tests/ClaudeRecall.Hook.Tests.csproj" />
+  <Project Path="ClaudeRecall.Hook/ClaudeRecall.Hook.csproj" />
+</Solution>

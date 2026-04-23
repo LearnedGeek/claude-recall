@@ -1,0 +1,114 @@
+name: build-wheels
+
+# Builds platform wheels on tag push. Windows wheel bundles the NativeAOT
+# hook binary (src/claude_recall/native/); the any-platform wheel omits it
+# and init-hooks falls back to the Python-CLI shell hook.
+#
+# Triggers:
+#   - push to any `v*` tag → build + upload release assets
+#   - manual dispatch for debugging
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+
+  build-wheel-win-x64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 9
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: python -m pip install --upgrade pip build
+
+      - name: Publish NativeAOT hook binary
+        # windows-latest has MSVC Build Tools + C++ workload pre-installed;
+        # no env-var workaround needed. We run dotnet publish directly rather
+        # than build-hook.ps1 to avoid the BuildTools-auto-detect dance.
+        run: |
+          dotnet publish src/ClaudeRecall.Hook -c Release -r win-x64 --self-contained -nologo
+          New-Item -ItemType Directory -Path src/claude_recall/native -Force | Out-Null
+          Copy-Item src/ClaudeRecall.Hook/bin/Release/net9.0/win-x64/publish/claude-recall-hook.exe -Destination src/claude_recall/native/ -Force
+          Copy-Item src/ClaudeRecall.Hook/bin/Release/net9.0/win-x64/publish/e_sqlite3.dll -Destination src/claude_recall/native/ -Force
+          Get-ChildItem src/claude_recall/native | Format-Table Name, Length
+
+      - name: Build wheel (win-x64 tag)
+        run: |
+          python -m build --wheel --outdir dist/ `
+            -C--build-option=--plat-name=win_amd64
+        # Fallback when --plat-name isn't supported by the build backend:
+        # we tag manually after the fact in the rename step below.
+        continue-on-error: true
+
+      - name: Build wheel (fallback — tag via rename)
+        run: |
+          if (-not (Get-ChildItem dist/*.whl -ErrorAction SilentlyContinue)) {
+            python -m build --wheel --outdir dist/
+            Get-ChildItem dist/*.whl | ForEach-Object {
+              $new = $_.Name -replace 'py3-none-any', 'py3-none-win_amd64'
+              Rename-Item $_.FullName $new
+            }
+          }
+
+      - name: C# tests
+        run: dotnet test src/ClaudeRecall.Hook.Tests --no-build --nologo
+
+      - name: Python tests
+        run: |
+          pip install -e ".[dev,embeddings]"
+          pytest -q
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-win-x64
+          path: dist/*.whl
+
+  build-wheel-any:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build pure-Python wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel --outdir dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-any
+          path: dist/*.whl
+
+  release:
+    needs: [build-wheel-win-x64, build-wheel-any]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/
+      - name: Attach wheels to GitHub Release
+        run: |
+          ls -la dist/
+          find dist/ -name "*.whl" -exec gh release upload ${{ github.ref_name }} {} --clobber \;
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

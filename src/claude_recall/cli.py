@@ -795,8 +795,22 @@ def _run_embed(
 # --- init-hooks -------------------------------------------------------------
 
 HOOKS_SRC_DIR = Path(__file__).resolve().parent / "hooks"
+NATIVE_SRC_DIR = Path(__file__).resolve().parent / "native"
 SETTINGS_FILENAME = "settings.json"
 HOOK_VERSION_FILENAME = ".claude-recall-version"
+
+
+def _native_hook_binary() -> Path | None:
+    """Return the path to the bundled C# hook binary if the wheel shipped one.
+
+    Windows wheels ship ``native/claude-recall-hook.exe``. Pure-Python wheels
+    (other platforms) don't; callers fall back to the shell-hook path.
+    """
+    if sys.platform == "win32":
+        exe = NATIVE_SRC_DIR / "claude-recall-hook.exe"
+        if exe.is_file():
+            return exe
+    return None
 
 
 def _cmd_init_hooks(args: argparse.Namespace, cfg: Config) -> int:
@@ -805,14 +819,31 @@ def _cmd_init_hooks(args: argparse.Namespace, cfg: Config) -> int:
     hooks_dir = claude_dir / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
 
+    # Detect whether the compiled hook binary shipped with this install.
+    bundled_binary = _native_hook_binary()
+
     if sys.platform == "win32":
         script_names = ["session_start.ps1", "on_prompt.ps1"]
         session_start_cmd = str(hooks_dir / "session_start.ps1")
-        on_prompt_cmd = str(hooks_dir / "on_prompt.ps1")
     else:
         script_names = ["session_start.sh", "on_prompt.sh"]
         session_start_cmd = str(hooks_dir / "session_start.sh")
-        on_prompt_cmd = str(hooks_dir / "on_prompt.sh")
+
+    if bundled_binary is not None:
+        # Fast path: C# binary replaces the on_prompt shell wrapper.
+        # SessionStart still runs as a shell script (not latency-critical).
+        if sys.platform == "win32":
+            script_names = ["session_start.ps1"]
+        else:
+            script_names = ["session_start.sh"]
+        on_prompt_cmd = str(hooks_dir / "claude-recall-hook.exe")
+    else:
+        # Pure-Python wheel: on_prompt stays a shell wrapper that shells out
+        # to the Python CLI. Existing v0.3 behavior.
+        if sys.platform == "win32":
+            on_prompt_cmd = str(hooks_dir / "on_prompt.ps1")
+        else:
+            on_prompt_cmd = str(hooks_dir / "on_prompt.sh")
 
     for name in script_names:
         src = HOOKS_SRC_DIR / name
@@ -826,6 +857,20 @@ def _cmd_init_hooks(args: argparse.Namespace, cfg: Config) -> int:
         shutil.copyfile(src, dst)
         if sys.platform != "win32":
             dst.chmod(0o755)
+
+    # Copy the native binary (and its SQLite sidecar, if present).
+    if bundled_binary is not None:
+        exe_dst = hooks_dir / "claude-recall-hook.exe"
+        if exe_dst.exists() and not args.force:
+            print(
+                f"skipping existing hook binary: {exe_dst} (use --force to overwrite)",
+                file=sys.stderr,
+            )
+        else:
+            shutil.copyfile(bundled_binary, exe_dst)
+        sidecar = NATIVE_SRC_DIR / "e_sqlite3.dll"
+        if sidecar.is_file():
+            shutil.copyfile(sidecar, hooks_dir / "e_sqlite3.dll")
 
     settings_path = claude_dir / SETTINGS_FILENAME
     if settings_path.exists():

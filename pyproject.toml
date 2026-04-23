@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-recall"
-version = "0.3.0"
+version = "0.4.0"
 description = "Automatic, cheap, precise query of Claude Code session archives via SQLite FTS5 + hooks."
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -48,6 +48,14 @@ Issues = "https://github.com/LearnedGeek/claude-recall/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["claude_recall*"]
+
+[tool.setuptools.package-data]
+# Ship the NativeAOT hook binary + its SQLite sidecar as package data on
+# platforms where it's been built. GH Actions produces win-x64 wheels with
+# these files populated; pure-Python wheels omit them and fall back to the
+# Python-CLI shell hook.
+claude_recall = ["native/*.exe", "native/*.dll"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
