@@ -40,7 +40,7 @@ claude-recall: SQLite FTS5 + optional semantic rerank over the Claude Code sessi
 
 Inspired directly by Microsoft's auto-memory post for Copilot CLI. Different agent, same insight: the archive is already on disk, the agent just isn't reading it.
 
-v0.4, MIT, beta. Repo: [link]. Blog post with the full story: [link].
+v0.4.2, MIT, beta. Repo: [link]. Blog post with the full story: [link].
 
 If you use Claude Code on anything with history, try it. File issues when it breaks.
 

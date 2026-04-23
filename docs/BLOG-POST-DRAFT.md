@@ -52,7 +52,7 @@ There's a deeper principle under those three: the tool's job is to make the arch
 
 ## The honest caveats
 
-This is v0.4, tagged beta. It works on my machine daily against a 25,000-message archive. It also has bugs — two install-path regressions caught and fixed in the last 48 hours, both closed before this post went up. The v0.5 release will land on PyPI so the install story becomes `pip install claude-recall` without a release-wheel URL.
+This is v0.4.2, tagged beta. It works on my machine daily against a 25,000-message archive. It also has bugs — three install-path and upgrade-path regressions caught and fixed in the last 48 hours, all closed before this post went up (issues #2, #3, #4 in the tracker). The v0.5 release will land on PyPI so the install story becomes `pip install claude-recall` without a release-wheel URL.
 
 It isn't semantic-search-of-everything. It isn't a replacement for CLAUDE.md or for the `memory/` auto-memory system Claude Code ships natively. It isn't cross-machine — your session archive is local, the index stays local. That's a feature for me, since the archive has personal data in it; it may be a limitation if you need shared recall across teammates.
 
