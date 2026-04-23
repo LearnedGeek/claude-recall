@@ -45,26 +45,27 @@ jobs:
           Copy-Item src/ClaudeRecall.Hook/bin/Release/net9.0/win-x64/publish/e_sqlite3.dll -Destination src/claude_recall/native/ -Force
           Get-ChildItem src/claude_recall/native | Format-Table Name, Length
 
-      - name: Build wheel (win-x64 tag)
+      - name: Build wheel (tag as win_amd64)
+        # setuptools produces `py3-none-any` by default for packages with no
+        # compiled Python extensions. Our wheel only contains binary *data*
+        # files (the AOT exe), which setuptools classifies as pure. Rename
+        # the output so pip's wheel resolver treats it as platform-specific
+        # and picks it over the `any` wheel on Windows x64.
         run: |
-          python -m build --wheel --outdir dist/ `
-            -C--build-option=--plat-name=win_amd64
-        # Fallback when --plat-name isn't supported by the build backend:
-        # we tag manually after the fact in the rename step below.
-        continue-on-error: true
-
-      - name: Build wheel (fallback — tag via rename)
-        run: |
-          if (-not (Get-ChildItem dist/*.whl -ErrorAction SilentlyContinue)) {
-            python -m build --wheel --outdir dist/
-            Get-ChildItem dist/*.whl | ForEach-Object {
+          python -m build --wheel --outdir dist/
+          Get-ChildItem dist/*.whl | ForEach-Object {
+            if ($_.Name -like '*py3-none-any*') {
               $new = $_.Name -replace 'py3-none-any', 'py3-none-win_amd64'
               Rename-Item $_.FullName $new
+              Write-Host "Renamed $($_.Name) → $new"
             }
           }
+          Get-ChildItem dist/*.whl
 
       - name: C# tests
-        run: dotnet test src/ClaudeRecall.Hook.Tests --no-build --nologo
+        # Don't pass --no-build — the AOT publish earlier was Release config;
+        # test project still needs its own Debug build.
+        run: dotnet test src/ClaudeRecall.Hook.Tests --nologo
 
       - name: Python tests
         run: |
