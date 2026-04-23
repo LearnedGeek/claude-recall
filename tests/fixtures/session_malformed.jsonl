@@ -1,0 +1,5 @@
+{"type":"user","message":{"role":"user","content":"First line is valid."},"timestamp":"2026-04-22T09:00:00Z","sessionId":"fixture-malformed-001"}
+this line is not valid json at all
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"This line should still be indexed after the bad line is skipped."}]},"timestamp":"2026-04-22T09:00:05Z","sessionId":"fixture-malformed-001"}
+{"type":"user","message":{"role":"user"
+{"type":"user","message":{"role":"user","content":"Last valid line. Indexer must reach this."},"timestamp":"2026-04-22T09:00:10Z","sessionId":"fixture-malformed-001"}

@@ -1,0 +1,4 @@
+{"type":"user","message":{"role":"user","content":"Run the tests."},"timestamp":"2026-04-22T10:00:00Z","sessionId":"fixture-tool-001"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Running tests now."},{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"pytest"}}]},"timestamp":"2026-04-22T10:00:02Z","sessionId":"fixture-tool-001"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"=== 45 passed in 2.1s ==="}]},"timestamp":"2026-04-22T10:00:04Z","sessionId":"fixture-tool-001"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"All 45 tests passed."}]},"timestamp":"2026-04-22T10:00:05Z","sessionId":"fixture-tool-001"}

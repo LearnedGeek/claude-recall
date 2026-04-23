@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-recall"
+version = "0.1.0"
+description = "Automatic, cheap, precise query of Claude Code session archives via SQLite FTS5 + hooks."
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [
+    {name = "Mark McArthey", email = "markm@learnedgeek.com"},
+]
+requires-python = ">=3.11"
+keywords = ["claude", "claude-code", "session", "memory", "fts5", "hooks"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Documentation",
+    "Topic :: Utilities",
+]
+dependencies = []
+
+[project.optional-dependencies]
+embeddings = [
+    "numpy>=1.26",
+    "httpx>=0.27",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+claude-recall = "claude_recall.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/LearnedGeek/claude-recall"
+Issues = "https://github.com/LearnedGeek/claude-recall/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]

@@ -1,0 +1,5 @@
+{"type":"user","message":{"role":"user","content":"We decided against using regex for this detection work three weeks ago. Can you remind me why?"},"timestamp":"2026-04-21T14:32:10Z","sessionId":"fixture-short-001"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"The principle we established is architecture-over-instruction. Regex was fragile and kept needing new patterns for each new fabrication class."}]},"timestamp":"2026-04-21T14:32:15Z","sessionId":"fixture-short-001"}
+{"type":"user","message":{"role":"user","content":"Right. So we went with the LLM claim extraction instead. That was Feature 14 v2."},"timestamp":"2026-04-21T14:33:02Z","sessionId":"fixture-short-001"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Correct. Check-only, suppress-not-regenerate. The model is never told it was wrong; the channel is gated."}]},"timestamp":"2026-04-21T14:33:07Z","sessionId":"fixture-short-001"}
+{"type":"user","message":{"role":"user","content":"Got it. Let's commit what we have."},"timestamp":"2026-04-21T14:34:00Z","sessionId":"fixture-short-001"}
