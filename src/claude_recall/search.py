@@ -130,14 +130,32 @@ def run_search(
 def _execute_with_fallback(
     conn: sqlite3.Connection, sql: str, query: str, tail_params: list
 ) -> list:
-    """Execute the FTS5 query, falling back to a token-OR query on parse error."""
-    for attempt in (query, _sanitize_query(query)):
+    """Execute the FTS5 query, falling back to a token-OR query.
+
+    The fallback triggers on parse error *or* on a zero-row raw result. A
+    natural-language prompt typically parses fine but AND-joins every token,
+    which almost never co-occur in one message and yields no hits. Re-issuing
+    as the OR-joined sanitized form catches that case while remaining
+    BM25-ranked.
+    """
+    sanitized = _sanitize_query(query)
+    attempts = [query]
+    if sanitized and sanitized != query.strip():
+        attempts.append(sanitized)
+
+    last_rows: list | None = None
+    for attempt in attempts:
         if not attempt or not attempt.strip():
             continue
         try:
-            return conn.execute(sql, [attempt, *tail_params]).fetchall()
+            rows = conn.execute(sql, [attempt, *tail_params]).fetchall()
         except sqlite3.OperationalError:
             continue
+        if rows:
+            return rows
+        last_rows = rows
+    if last_rows is not None:
+        return last_rows
     raise SearchError(f"could not build a valid FTS5 query from: {query!r}")
 
 

@@ -59,7 +59,8 @@ def test_version_flag_prints_semver(capsys):
         cli.main(["--version"])
     assert exc.value.code == 0
     out = capsys.readouterr().out
-    assert "0.1.0" in out
+    from claude_recall import __version__
+    assert __version__ in out
 
 
 def test_index_then_search_end_to_end(cli_env):

@@ -76,6 +76,22 @@ def test_malformed_query_falls_back(indexed_db):
     assert resp.total_matches >= 1
 
 
+def test_natural_language_query_zero_hit_fallback(indexed_db):
+    """A natural-language prompt whose AND-join finds nothing falls back to OR-joined tokens.
+
+    This is the v0.1.1 stepping-stone for issue #1 — raw FTS5 AND-joins every
+    token in the query, which almost never co-occur in a single message. The
+    sanitized OR-joined fallback now fires on zero hits, not only on parse
+    failure, so natural-language prompts return useful matches.
+    """
+    resp = search.run_search(
+        indexed_db, "remind me what we decided about regex patterns"
+    )
+    assert resp.total_matches >= 1
+    preview = resp.results[0].content_preview.lower()
+    assert "regex" in preview or "patterns" in preview
+
+
 def test_unparseable_query_raises(indexed_db):
     """A query with no usable tokens raises SearchError."""
     with pytest.raises(search.SearchError):
