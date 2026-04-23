@@ -20,7 +20,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from . import __version__, indexer, search, storage
+from . import __version__, indexer, projects, search, storage
 from .config import Config, load_config
 
 
@@ -47,16 +47,24 @@ def build_parser() -> argparse.ArgumentParser:
     # search
     p_search = sub.add_parser("search", help="Query the index.")
     p_search.add_argument("query")
-    p_search.add_argument("--days", type=int, default=90)
-    p_search.add_argument("--limit", type=int, default=10)
-    p_search.add_argument("--project")
-    p_search.add_argument("--threshold", type=float, default=0.0)
+    p_search.add_argument("--days", type=int, default=None)
+    p_search.add_argument("--limit", type=int, default=None)
+    p_search.add_argument(
+        "--project",
+        help="Exact project slug, or 'auto' to scope to the current working directory.",
+    )
+    p_search.add_argument("--threshold", type=float, default=None)
     p_search.add_argument("--format", choices=["json", "text"], default="text")
     p_search.add_argument("--agent-context", action="store_true")
     p_search.add_argument(
         "--extract-keywords",
         action="store_true",
         help="Strip stopwords/pronouns from a natural-language query before FTS5.",
+    )
+    p_search.add_argument(
+        "--from-config",
+        action="store_true",
+        help="Use hook_days/hook_limit/hook_threshold from config.toml for unspecified flags.",
     )
 
     # show
@@ -161,14 +169,24 @@ def _cmd_search(args: argparse.Namespace, cfg: Config) -> int:
         print(f"database error: {exc}", file=sys.stderr)
         return 3
     try:
+        days = _resolve_flag(args.days, cfg.search.hook_days, 90, args.from_config)
+        limit = _resolve_flag(args.limit, cfg.search.hook_limit, 10, args.from_config)
+        threshold = _resolve_flag(
+            args.threshold, cfg.search.hook_threshold, 0.0, args.from_config
+        )
+
+        project_slug = args.project
+        if project_slug == "auto":
+            project_slug = projects.resolve_project_slug(conn)
+
         try:
             response = search.run_search(
                 conn,
                 query=args.query,
-                days=args.days,
-                limit=args.limit,
-                project_slug=args.project,
-                threshold=args.threshold,
+                days=days,
+                limit=limit,
+                project_slug=project_slug,
+                threshold=threshold,
                 extract_keywords=args.extract_keywords,
             )
         except search.SearchError as exc:
@@ -179,6 +197,15 @@ def _cmd_search(args: argparse.Namespace, cfg: Config) -> int:
         return 0
     finally:
         conn.close()
+
+
+def _resolve_flag(cli_value, config_value, default, from_config: bool):
+    """CLI explicit > config (only when --from-config) > hardcoded default."""
+    if cli_value is not None:
+        return cli_value
+    if from_config:
+        return config_value
+    return default
 
 
 # --- show -------------------------------------------------------------------
@@ -370,6 +397,12 @@ def _cmd_status(args: argparse.Namespace, cfg: Config) -> int:
         if conn is not None:
             conn.close()
 
+    installed_hook_version = _read_installed_hook_version()
+    hooks_stale = (
+        installed_hook_version is not None
+        and installed_hook_version != __version__
+    )
+
     payload = {
         "archive_root": str(cfg.archive_root),
         "db_path": str(db_path),
@@ -379,11 +412,14 @@ def _cmd_status(args: argparse.Namespace, cfg: Config) -> int:
         "total_messages": total_messages,
         "most_recent_session": most_recent,
         "last_indexed_at": last_indexed,
+        "package_version": __version__,
+        "installed_hook_version": installed_hook_version,
         "checks": {
             "archive_accessible": archive_accessible,
             "db_accessible": db_accessible,
             "schema_current": schema_current,
             "fts_available": fts_available,
+            "hooks_current": not hooks_stale,
         },
     }
 
@@ -394,11 +430,18 @@ def _cmd_status(args: argparse.Namespace, cfg: Config) -> int:
             print("claude-recall: db unavailable")
         else:
             mr = (most_recent or "")[:16]
-            print(
+            line = (
                 f"claude-recall: {total_sessions} sessions, "
                 f"{total_messages:,} messages indexed"
                 + (f", most recent {mr}" if mr else "")
             )
+            if hooks_stale:
+                line += (
+                    f". Hooks at v{installed_hook_version}, package is "
+                    f"v{__version__} — run `claude-recall init-hooks --force` "
+                    f"to upgrade."
+                )
+            print(line)
     else:
         print(f"archive_root:         {payload['archive_root']}")
         print(f"db_path:              {payload['db_path']}")
@@ -408,9 +451,16 @@ def _cmd_status(args: argparse.Namespace, cfg: Config) -> int:
         print(f"total_messages:       {payload['total_messages']}")
         print(f"most_recent_session:  {payload['most_recent_session']}")
         print(f"last_indexed_at:      {payload['last_indexed_at']}")
+        print(f"package_version:      {payload['package_version']}")
+        print(f"installed_hook_version: {payload['installed_hook_version']}")
         print("checks:")
         for k, v in payload["checks"].items():
             print(f"  {k}: {v}")
+        if hooks_stale:
+            print(
+                f"\nhooks are stale: v{installed_hook_version} installed, "
+                f"v{__version__} is current. Run `claude-recall init-hooks --force`."
+            )
     return 0
 
 
@@ -418,6 +468,7 @@ def _cmd_status(args: argparse.Namespace, cfg: Config) -> int:
 
 HOOKS_SRC_DIR = Path(__file__).resolve().parent / "hooks"
 SETTINGS_FILENAME = "settings.json"
+HOOK_VERSION_FILENAME = ".claude-recall-version"
 
 
 def _cmd_init_hooks(args: argparse.Namespace, cfg: Config) -> int:
@@ -473,10 +524,23 @@ def _cmd_init_hooks(args: argparse.Namespace, cfg: Config) -> int:
     settings_path.write_text(
         json.dumps(settings, indent=2) + "\n", encoding="utf-8"
     )
-    print(f"claude-recall: hooks installed at {hooks_dir}")
+    (hooks_dir / HOOK_VERSION_FILENAME).write_text(
+        __version__ + "\n", encoding="utf-8"
+    )
+    print(f"claude-recall: hooks installed at {hooks_dir} (v{__version__})")
     print(f"claude-recall: settings merged into {settings_path}")
     print("claude-recall: run `claude-recall index` once to build the index.")
     return 0
+
+
+def _read_installed_hook_version(project_root: Path | None = None) -> str | None:
+    """Return the version stamp written by init-hooks, or None if missing."""
+    root = project_root if project_root is not None else Path.cwd()
+    stamp = root / ".claude" / "hooks" / HOOK_VERSION_FILENAME
+    try:
+        return stamp.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
 
 
 def _merge_hook(

@@ -2,6 +2,45 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.2.1 — 2026-04-23
+
+Hook-delivery-layer fixes from [issue #2](https://github.com/LearnedGeek/claude-recall/issues/2).
+On a multi-project install the v0.2.0 hook surfaced cross-project matches
+because it passed no `--project` filter and hardcoded `--days 30` regardless
+of `config.toml`. Both fixed here.
+
+### Added
+
+- `claude_recall.projects` module. `slug_from_path(path)` computes the
+  Claude Code slug convention (lowercase drive letter, separators → `-`).
+  `resolve_project_slug(conn, cwd)` resolves against the indexed sessions
+  case-insensitively, returning the actual stored slug when the archive
+  uses the older `E--` form.
+- `--project auto` on `claude-recall search`. Resolves to the current
+  working directory's slug. Shipped hook scripts now pass it.
+- `--from-config` flag on `claude-recall search`. When set, unspecified
+  flags (`--days`, `--limit`, `--threshold`) default to `[search] hook_*`
+  values from `config.toml`. Explicit CLI flags still win. Shipped hook
+  scripts now pass it instead of hardcoding values.
+- Hook version stamp: `init-hooks` writes `.claude/hooks/.claude-recall-version`.
+  `status --format agent-context` surfaces a stale-hook warning when the
+  stamp disagrees with the installed package, pointing at `init-hooks --force`.
+  `status` JSON exposes `package_version`, `installed_hook_version`, and
+  the new `hooks_current` check.
+
+### Changed
+
+- `on_prompt.sh` / `on_prompt.ps1` invocation went from
+  `--days 30 --limit 3 --threshold 0.3 --extract-keywords --agent-context`
+  to `--project auto --from-config --extract-keywords --agent-context`.
+  Tunings in `config.toml` now actually take effect.
+- `init-hooks` output now prints the version it wrote.
+
+### Tests
+
+96 passing. `tests/test_projects.py` (7), new CLI cases for `--project auto`,
+`--from-config` precedence, and the hook version stamp.
+
 ## v0.2.0 — 2026-04-23
 
 Keyword extraction in the `UserPromptSubmit` hook path (PLAN §13 v0.2 item, §17

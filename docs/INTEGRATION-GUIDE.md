@@ -222,15 +222,26 @@ When Mark says *"let's keep building the agentic lens design"*, SessionStart has
 
 ## 8. Multi-project use
 
-`claude-recall`'s default is to index all projects. When running hooks from a specific project, the hook passes the project slug to narrow queries:
+`claude-recall` indexes all projects globally but scopes hook queries to the
+current project. Since v0.2.1 the shipped `UserPromptSubmit` hook passes
+`--project auto`, which resolves the current working directory to the
+matching project slug (handling both lowercase and legacy uppercase slugs).
+
+For direct CLI queries you have three options:
 
 ```bash
+# Auto-scope to cwd (what the hook does):
+claude-recall search "design decision" --project auto
+
+# Explicit slug:
 claude-recall search "design decision" --project e--Documents-Work-dev-repos-AmbientNaturalIntelligence
+
+# Cross-project recall (insight from Project A informs Project B):
+claude-recall search "design decision"          # no --project = global
 ```
 
-If you want cross-project recall (e.g., an insight from Project A informs Project B), pass the search query without `--project` — defaults to global search.
-
-v0.4 will add explicit `--global` vs. `--project-only` flags to the hook behavior itself. MVP: hooks scope to the current project by default via `pwd`-derived slug detection.
+v0.4 will add an explicit `--all-projects` flag; for now, omitting `--project`
+is the cross-project path.
 
 ---
 
@@ -241,6 +252,9 @@ v0.4 will add explicit `--global` vs. `--project-only` flags to the hook behavio
 | "Too much irrelevant context is being injected" | Raise `hook_threshold` in config. Default `0.3` → try `0.5`. |
 | "Relevant context is being missed" | Lower `hook_threshold`. Or add an explicit `claude-recall search` invocation in your message when you need assurance. |
 | "The hook returns `{}` on most natural-language prompts" | Fixed in v0.2.0 via `--extract-keywords` in the shipped hook scripts. The hook strips stopwords/pronouns/fillers before FTS5 so topical tokens surface cleanly. v0.1.1 introduced an OR-join fallback as a stepping-stone; v0.2.0 is the proper fix. If you're still on v0.1.0 or v0.1.1, upgrade ([issue #1](https://github.com/LearnedGeek/claude-recall/issues/1)). |
+| "Hook returns matches from the wrong project on a multi-project install" | Fixed in v0.2.1. The shipped hook now passes `--project auto`, which resolves to the current working directory's slug. Upgrade and run `claude-recall init-hooks --force` to pick up the new hook script ([issue #2](https://github.com/LearnedGeek/claude-recall/issues/2)). |
+| "My `hook_days`/`hook_limit`/`hook_threshold` settings in `config.toml` aren't taking effect" | Fixed in v0.2.1. Pre-v0.2.1 hooks hardcoded `--days 30 --limit 3 --threshold 0.3`. The v0.2.1 hook passes `--from-config` so those values come from `[search]` in `config.toml`. Upgrade and run `claude-recall init-hooks --force`. |
+| "I upgraded `claude-recall` and something feels off" | Run `claude-recall status`. Since v0.2.1 it reports `package_version` vs. `installed_hook_version` and flags stale hooks. Run `claude-recall init-hooks --force` to align. |
 | "SessionStart hook is slow" | Confirm index is incremental by checking `claude-recall status`; run `claude-recall index --rebuild` once to normalize. |
 | "Hook fires but output never shows up in Claude" | Check `.claude/settings.json` was merged correctly. Run the hook manually — `bash .claude/hooks/claude-recall-on-prompt.sh` with a test JSON input — and confirm stdout is valid JSON. |
 | "FTS5 isn't available on my system" | Rare. `claude-recall status` reports `fts_available: false`. Upgrade Python or rebuild with FTS5 support. |
