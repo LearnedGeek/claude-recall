@@ -59,3 +59,18 @@ Thumbs.db
 .env.local
 *.key
 *.pem
+
+# .NET / C# build artifacts
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+project.lock.json
+.vs/
+
+# claude-recall native binary (built by GH Actions or build-hook.ps1)
+# Source tree should not contain the binary; wheels do.
+src/claude_recall/native/*.exe
+src/claude_recall/native/*.dll
