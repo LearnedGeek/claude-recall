@@ -20,13 +20,25 @@ Claude Code writes every session to `~/.claude/projects/<project-slug>/<session-
 
 ## Install
 
-Not on PyPI yet — v0.2.0 target. For now, install from source:
+Not on PyPI yet — v0.5 target. Until then, install from a GitHub Release wheel.
+
+**Windows x64** (gets the NativeAOT hook binary bundled for ~80ms semantic hooks):
 
 ```bash
-pip install git+https://github.com/LearnedGeek/claude-recall.git
-claude-recall init-hooks        # wires hooks into the current project's .claude/settings.json
-claude-recall index             # first-time index of the session archive
+pip install --upgrade "claude_recall[embeddings] @ https://github.com/LearnedGeek/claude-recall/releases/download/v0.4.0/claude_recall-0.4.0-py3-none-win_amd64.whl"
+claude-recall init-hooks
+claude-recall index
 ```
+
+**macOS / Linux** (pure-Python wheel — shell-hook fallback path, no compiled binary yet):
+
+```bash
+pip install --upgrade "claude_recall[embeddings] @ https://github.com/LearnedGeek/claude-recall/releases/download/v0.4.0/claude_recall-0.4.0-py3-none-any.whl"
+claude-recall init-hooks
+claude-recall index
+```
+
+> **Don't use `pip install git+https://...`** — that builds a wheel from the source tree which does not include the NativeAOT binary (it's CI-built per-platform). The `git+https` install works but gives you the pure-Python hook path on every platform.
 
 ---
 

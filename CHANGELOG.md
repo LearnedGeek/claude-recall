@@ -60,14 +60,24 @@ now ships as the default because the 500ms budget constraint is gone.
 
 ### Distribution
 
-- Installing on Windows x64: `pip install claude-recall` gets the wheel
-  with the binary bundled. `init-hooks` drops it into `.claude/hooks/`
-  and registers it. No additional setup.
-- Installing on macOS/Linux: `pip install claude-recall` gets the
-  pure-Python wheel. `init-hooks` wires the v0.3 shell hook. Users who
-  want the compiled binary can build it locally via `build-hook.ps1` — or
-  wait for v0.4.1 when CI adds those platform builds.
-- First PyPI publish still gated on v0.5 (PLAN §13).
+Not on PyPI yet — v0.5 target. Install from the v0.4.0 GitHub Release wheels:
+
+- **Windows x64** (binary bundled):
+  ```bash
+  pip install --upgrade "claude_recall[embeddings] @ https://github.com/LearnedGeek/claude-recall/releases/download/v0.4.0/claude_recall-0.4.0-py3-none-win_amd64.whl"
+  claude-recall init-hooks --force   # picks up the new binary + stamps version
+  ```
+- **macOS / Linux** (pure-Python shell-hook fallback):
+  ```bash
+  pip install --upgrade "claude_recall[embeddings] @ https://github.com/LearnedGeek/claude-recall/releases/download/v0.4.0/claude_recall-0.4.0-py3-none-any.whl"
+  claude-recall init-hooks --force
+  ```
+
+> **Don't use `pip install git+https://...`** for v0.4 upgrades — that builds
+> from source and the NativeAOT binary is CI-built package data, not part
+> of the source tree. A `git+https` install produces a wheel with no binary,
+> and `init-hooks` falls back to the v0.3 shell hook path silently.
+> Use the release wheel URLs above to get the binary.
 
 ### Tests
 

@@ -23,20 +23,35 @@ You should see one directory per project, each containing `.jsonl` files. The di
 
 ## 2. Install
 
-```bash
-# From PyPI (once v0.2 ships)
-pip install claude-recall
+Not on PyPI yet — v0.5 target. Until then, install from a GitHub Release wheel. Pip will pick up the platform-specific wheel that matches your machine.
 
-# Or from source during development
-cd ~/dev/repos/claude-recall
-pip install -e .
+**Windows x64** (ships with the C# NativeAOT hook binary for ~80ms semantic hooks):
+
+```bash
+pip install --upgrade "claude_recall[embeddings] @ https://github.com/LearnedGeek/claude-recall/releases/download/v0.4.0/claude_recall-0.4.0-py3-none-win_amd64.whl"
 ```
+
+**macOS / Linux** (pure-Python wheel; shell-hook fallback; no compiled binary on these platforms yet):
+
+```bash
+pip install --upgrade "claude_recall[embeddings] @ https://github.com/LearnedGeek/claude-recall/releases/download/v0.4.0/claude_recall-0.4.0-py3-none-any.whl"
+```
+
+**Developer install** (clone + editable; no binary unless you run `build-hook.ps1` locally):
+
+```bash
+git clone https://github.com/LearnedGeek/claude-recall
+cd claude-recall
+pip install -e ".[embeddings,dev]"
+```
+
+> **Avoid `pip install git+https://...`** — that builds from source and leaves out the NativeAOT binary (it's CI-built per-platform), so `init-hooks` falls back to the pure-Python hook path. Use the release wheel URLs above for the fast path.
 
 Verify:
 
 ```bash
 claude-recall --version
-# 0.1.0
+# 0.4.0
 ```
 
 ---
@@ -255,7 +270,9 @@ is the cross-project path.
 | "Hook returns matches from the wrong project on a multi-project install" | Fixed in v0.2.1. The shipped hook now passes `--project auto`, which resolves to the current working directory's slug. Upgrade and run `claude-recall init-hooks --force` to pick up the new hook script ([issue #2](https://github.com/LearnedGeek/claude-recall/issues/2)). |
 | "My `hook_days`/`hook_limit`/`hook_threshold` settings in `config.toml` aren't taking effect" | Fixed in v0.2.1. Pre-v0.2.1 hooks hardcoded `--days 30 --limit 3 --threshold 0.3`. The v0.2.1 hook passes `--from-config` so those values come from `[search]` in `config.toml`. Upgrade and run `claude-recall init-hooks --force`. |
 | "I upgraded `claude-recall` and something feels off" | Run `claude-recall status`. Since v0.2.1 it reports `package_version` vs. `installed_hook_version` and flags stale hooks. Run `claude-recall init-hooks --force` to align. |
-| "I want semantic retrieval in the hook, not just the CLI" | v0.3.0 ships with `[embeddings].use_in_hook = false` because semantic-on hook latency is ~700ms (over PLAN §7.3 budget). Once you've verified Ollama is warm and the 200ms overrun is acceptable, set `use_in_hook = true` in `~/.config/claude-recall/config.toml` (or `%APPDATA%\claude-recall\config.toml`). The v0.4.0 compiled hook binary removes the budget concern. |
+| "I want semantic retrieval in the hook, not just the CLI" | **v0.4.0 (Windows x64):** the C# hook binary brings semantic-in-hook to ~80ms and `[embeddings].use_in_hook` defaults to `true`. Semantic fires automatically when you set `[embeddings].enabled = true`. **v0.4.0 (other platforms) / v0.3.x:** still runs the Python shell hook at ~700ms; `use_in_hook` defaults to `false`; set it to `true` explicitly if the latency is acceptable on your machine. |
+| "My hook used to be Python, now I installed v0.4 — how do I tell which path runs?" | `claude-recall status` prints `installed_hook_version`. If the binary is wired, `.claude/settings.json`'s `UserPromptSubmit.command` ends in `claude-recall-hook.exe`; if the shell hook is wired, it ends in `.ps1` or `.sh`. After upgrading, run `claude-recall init-hooks --force` to pick up whichever is appropriate for your platform + wheel. |
+| "I want to disable the binary and force the Python path back" | Uninstall + re-install the pure-Python wheel (`...py3-none-any.whl`), OR delete `.claude/hooks/claude-recall-hook.exe` and edit `.claude/settings.json` to point UserPromptSubmit at `on_prompt.ps1` / `on_prompt.sh`. The shell hook remains in `.claude/hooks/` unless you removed it manually. |
 | "How do I turn on embeddings?" | `pip install 'claude-recall[embeddings]'`, ensure Ollama is running and `ollama pull nomic-embed-text`, set `[embeddings].enabled = true` in config, then run `claude-recall embed --verbose` once. Check `claude-recall status --format agent-context` — it should show `Embeddings: <N> vectors, Ollama reachable`. |
 | "SessionStart hook is slow" | Confirm index is incremental by checking `claude-recall status`; run `claude-recall index --rebuild` once to normalize. |
 | "Hook fires but output never shows up in Claude" | Check `.claude/settings.json` was merged correctly. Run the hook manually — `bash .claude/hooks/claude-recall-on-prompt.sh` with a test JSON input — and confirm stdout is valid JSON. |
