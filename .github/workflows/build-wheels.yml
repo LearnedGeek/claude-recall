@@ -104,12 +104,18 @@ jobs:
     permissions:
       contents: write
     steps:
+      # `gh release upload` needs either a git repo on disk OR an explicit
+      # --repo. v0.4.1 shipped with neither and silently failed to attach
+      # wheels. Use --repo explicitly so the job never depends on repo
+      # context.
       - uses: actions/download-artifact@v4
         with:
           path: dist/
       - name: Attach wheels to GitHub Release
         run: |
           ls -la dist/
-          find dist/ -name "*.whl" -exec gh release upload ${{ github.ref_name }} {} --clobber \;
+          find dist/ -name "*.whl" -print0 | xargs -0 -I{} \
+            gh release upload ${{ github.ref_name }} {} \
+              --repo ${{ github.repository }} --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
