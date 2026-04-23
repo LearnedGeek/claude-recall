@@ -31,6 +31,13 @@ class EmbeddingsConfig:
     enabled: bool = False
     ollama_base_url: str = "http://localhost:11434"
     model: str = "nomic-embed-text"
+    rerank_pool_size: int = 50
+    request_timeout_seconds: float = 10.0
+    batch_size: int = 32
+    # Hook uses --semantic when true AND enabled is true. Default false for
+    # v0.3 because semantic-on hook latency is ~700ms (over the PLAN §7.3
+    # 500ms budget). v0.4 C# hook binary removes the budget concern.
+    use_in_hook: bool = False
 
 
 @dataclass
@@ -94,7 +101,15 @@ def _load_toml(path: Path) -> Config:
     if tool_blocks is not None:
         cfg.indexing.index_tool_blocks = bool(tool_blocks)
 
-    for field_name in ("enabled", "ollama_base_url", "model"):
+    for field_name in (
+        "enabled",
+        "ollama_base_url",
+        "model",
+        "rerank_pool_size",
+        "request_timeout_seconds",
+        "batch_size",
+        "use_in_hook",
+    ):
         val = _dig(data, "embeddings", field_name)
         if val is not None:
             setattr(cfg.embeddings, field_name, val)

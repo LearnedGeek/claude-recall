@@ -26,7 +26,7 @@ fi
 
 # Call search with the full prompt as query.
 # v0.2 will add keyword extraction; MVP uses raw prompt.
-RESULT=$(claude-recall search "$PROMPT" --project auto --from-config --extract-keywords --agent-context 2>/dev/null)
+RESULT=$(claude-recall search "$PROMPT" --project auto --from-config --extract-keywords --semantic-from-config --agent-context 2>/dev/null)
 
 if [ -z "$RESULT" ] || [ "$RESULT" = '{}' ]; then
     echo '{}'

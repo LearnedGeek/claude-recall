@@ -66,6 +66,22 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use hook_days/hook_limit/hook_threshold from config.toml for unspecified flags.",
     )
+    p_search.add_argument(
+        "--semantic",
+        action="store_true",
+        help=(
+            "Rerank top FTS5 candidates by cosine against an Ollama embedding. "
+            "Requires [embeddings].enabled=true; otherwise soft-ignored with a warning."
+        ),
+    )
+    p_search.add_argument(
+        "--semantic-from-config",
+        action="store_true",
+        help=(
+            "Use --semantic if [embeddings].enabled AND [embeddings].use_in_hook "
+            "are both true in config.toml. Shipped hook scripts pass this flag."
+        ),
+    )
 
     # show
     p_show = sub.add_parser("show", help="Fetch a session's full transcript.")
@@ -91,6 +107,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--project-root", help="Defaults to cwd.")
     p_init.add_argument("--force", action="store_true")
 
+    # embed (v0.3, opt-in)
+    p_embed = sub.add_parser(
+        "embed",
+        help="Compute embeddings for indexed messages. Requires [embeddings] extra + Ollama.",
+    )
+    p_embed.add_argument(
+        "--project",
+        help="Scope to one project slug, or 'auto' for cwd.",
+    )
+    p_embed.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="Drop all vectors in scope and re-embed from scratch.",
+    )
+    p_embed.add_argument(
+        "--batch-size", type=int, default=None,
+        help="Override [embeddings].batch_size (default 32).",
+    )
+    p_embed.add_argument(
+        "--probe",
+        action="store_true",
+        help="Only test the Ollama connection + model availability; do not embed.",
+    )
+    p_embed.add_argument("--verbose", action="store_true")
+
     return parser
 
 
@@ -108,6 +149,7 @@ def main(argv: list[str] | None = None) -> int:
         "list": _cmd_list,
         "status": _cmd_status,
         "init-hooks": _cmd_init_hooks,
+        "embed": _cmd_embed,
     }
     return handlers[args.command](args, cfg)
 
@@ -179,6 +221,37 @@ def _cmd_search(args: argparse.Namespace, cfg: Config) -> int:
         if project_slug == "auto":
             project_slug = projects.resolve_project_slug(conn)
 
+        ollama_client = None
+        semantic = bool(args.semantic)
+        if args.semantic_from_config and not semantic:
+            # Hook path: only opt in when both enabled AND explicitly permitted
+            # for the hook. Keeps the shipped hook under the 500ms budget unless
+            # the user opts in after confirming their setup.
+            if cfg.embeddings.enabled and cfg.embeddings.use_in_hook:
+                semantic = True
+        if semantic:
+            if not cfg.embeddings.enabled:
+                print(
+                    "--semantic: [embeddings].enabled is false; "
+                    "running FTS5-only. Enable in config.toml to activate rerank.",
+                    file=sys.stderr,
+                )
+                semantic = False
+            else:
+                try:
+                    ollama_client = _ollama_client_factory(
+                        cfg.embeddings.ollama_base_url,
+                        cfg.embeddings.model,
+                        cfg.embeddings.request_timeout_seconds,
+                    )
+                except ImportError as exc:
+                    print(
+                        f"--semantic: [embeddings] extra not installed ({exc}); "
+                        f"running FTS5-only.",
+                        file=sys.stderr,
+                    )
+                    semantic = False
+
         try:
             response = search.run_search(
                 conn,
@@ -188,10 +261,21 @@ def _cmd_search(args: argparse.Namespace, cfg: Config) -> int:
                 project_slug=project_slug,
                 threshold=threshold,
                 extract_keywords=args.extract_keywords,
+                semantic=semantic,
+                ollama_client=ollama_client,
+                rerank_pool_size=cfg.embeddings.rerank_pool_size,
             )
         except search.SearchError as exc:
             print(f"invalid query: {exc}", file=sys.stderr)
             return 2
+        finally:
+            if ollama_client is not None:
+                ollama_client.close()
+        if response.semantic_fallback_reason:
+            print(
+                f"--semantic: falling back to FTS5 ({response.semantic_fallback_reason})",
+                file=sys.stderr,
+            )
         fmt = "agent-context" if args.agent_context else args.format
         print(search.format_result(response, format=fmt))
         return 0
@@ -364,6 +448,8 @@ def _cmd_status(args: argparse.Namespace, cfg: Config) -> int:
     last_indexed: str | None = None
     db_size = 0
 
+    vectors_indexed = 0
+    messages_without_vectors = 0
     conn: sqlite3.Connection | None = None
     try:
         try:
@@ -391,6 +477,10 @@ def _cmd_status(args: argparse.Namespace, cfg: Config) -> int:
             last_indexed = conn.execute(
                 "SELECT MAX(indexed_at) AS m FROM sessions"
             ).fetchone()["m"]
+            vectors_indexed = conn.execute(
+                "SELECT COUNT(*) AS c FROM message_vectors"
+            ).fetchone()["c"]
+            messages_without_vectors = max(0, total_messages - vectors_indexed)
             if db_path.exists():
                 db_size = db_path.stat().st_size
     finally:
@@ -401,6 +491,14 @@ def _cmd_status(args: argparse.Namespace, cfg: Config) -> int:
     hooks_stale = (
         installed_hook_version is not None
         and installed_hook_version != __version__
+    )
+
+    embeddings_enabled = cfg.embeddings.enabled
+    ollama_reachable = False
+    if embeddings_enabled:
+        ollama_reachable = _probe_ollama_reachable(cfg)
+    embeddings_ready = (
+        embeddings_enabled and ollama_reachable and vectors_indexed > 0
     )
 
     payload = {
@@ -414,12 +512,17 @@ def _cmd_status(args: argparse.Namespace, cfg: Config) -> int:
         "last_indexed_at": last_indexed,
         "package_version": __version__,
         "installed_hook_version": installed_hook_version,
+        "embeddings_enabled": embeddings_enabled,
+        "ollama_reachable": ollama_reachable,
+        "vectors_indexed": vectors_indexed,
+        "messages_without_vectors": messages_without_vectors,
         "checks": {
             "archive_accessible": archive_accessible,
             "db_accessible": db_accessible,
             "schema_current": schema_current,
             "fts_available": fts_available,
             "hooks_current": not hooks_stale,
+            "embeddings_ready": embeddings_ready,
         },
     }
 
@@ -435,6 +538,24 @@ def _cmd_status(args: argparse.Namespace, cfg: Config) -> int:
                 f"{total_messages:,} messages indexed"
                 + (f", most recent {mr}" if mr else "")
             )
+            if embeddings_enabled:
+                if embeddings_ready:
+                    line += (
+                        f". Embeddings: {vectors_indexed:,} vectors, "
+                        f"Ollama reachable."
+                    )
+                elif not ollama_reachable:
+                    line += ". Embeddings: Ollama unreachable."
+                elif vectors_indexed == 0:
+                    line += (
+                        ". Embeddings: 0 vectors "
+                        "(run `claude-recall embed`)."
+                    )
+                elif messages_without_vectors > 0:
+                    line += (
+                        f". Embeddings: {messages_without_vectors:,} "
+                        f"messages unembedded (run `claude-recall embed`)."
+                    )
             if hooks_stale:
                 line += (
                     f". Hooks at v{installed_hook_version}, package is "
@@ -453,6 +574,10 @@ def _cmd_status(args: argparse.Namespace, cfg: Config) -> int:
         print(f"last_indexed_at:      {payload['last_indexed_at']}")
         print(f"package_version:      {payload['package_version']}")
         print(f"installed_hook_version: {payload['installed_hook_version']}")
+        print(f"embeddings_enabled:   {payload['embeddings_enabled']}")
+        print(f"ollama_reachable:     {payload['ollama_reachable']}")
+        print(f"vectors_indexed:      {payload['vectors_indexed']}")
+        print(f"messages_without_vectors: {payload['messages_without_vectors']}")
         print("checks:")
         for k, v in payload["checks"].items():
             print(f"  {k}: {v}")
@@ -462,6 +587,209 @@ def _cmd_status(args: argparse.Namespace, cfg: Config) -> int:
                 f"v{__version__} is current. Run `claude-recall init-hooks --force`."
             )
     return 0
+
+
+# --- embed (v0.3) -----------------------------------------------------------
+
+# Injectable client factory so tests can mock the Ollama path without
+# patching module-level imports. Production path always returns a real
+# OllamaClient; tests override _ollama_client_factory in the module namespace.
+def _ollama_client_factory(base_url: str, model: str, timeout: float):
+    from . import embeddings as _embeddings
+    return _embeddings.OllamaClient(base_url=base_url, model=model, timeout=timeout)
+
+
+def _probe_ollama_reachable(cfg: Config) -> bool:
+    """Best-effort reachability probe for the status command. Never raises."""
+    try:
+        client = _ollama_client_factory(
+            cfg.embeddings.ollama_base_url,
+            cfg.embeddings.model,
+            min(cfg.embeddings.request_timeout_seconds, 2.0),
+        )
+    except ImportError:
+        return False
+    try:
+        return client.probe().ollama_reachable
+    except Exception:
+        return False
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
+def _cmd_embed(args: argparse.Namespace, cfg: Config) -> int:
+    try:
+        from . import embeddings as _embeddings  # noqa: F401 — import probes [embeddings] extra
+    except ImportError as exc:
+        print(
+            f"claude-recall embed requires the [embeddings] extra ({exc}). "
+            f"Install with: pip install 'claude-recall[embeddings]'",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not cfg.embeddings.enabled and not args.probe:
+        print(
+            "embeddings disabled in config. Set [embeddings].enabled = true "
+            "to embed, or pass --probe to test the Ollama path.",
+            file=sys.stderr,
+        )
+        return 1
+
+    client = _ollama_client_factory(
+        cfg.embeddings.ollama_base_url,
+        cfg.embeddings.model,
+        cfg.embeddings.request_timeout_seconds,
+    )
+
+    if args.probe:
+        try:
+            result = client.probe()
+        finally:
+            client.close()
+        payload = {
+            "ollama_reachable": result.ollama_reachable,
+            "version": result.version,
+            "model_present": result.model_present,
+            "embed_ok": result.embed_ok,
+            "dim": result.dim,
+            "error": result.error,
+        }
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0 if result.embed_ok else 2
+
+    try:
+        conn = storage.open_db(cfg.db_path)
+    except storage.StorageError as exc:
+        print(f"database error: {exc}", file=sys.stderr)
+        client.close()
+        return 3
+
+    project_slug = args.project
+    if project_slug == "auto":
+        project_slug = projects.resolve_project_slug(conn)
+
+    batch_size = args.batch_size or cfg.embeddings.batch_size
+    report = _run_embed(
+        conn,
+        client,
+        project_slug=project_slug,
+        rebuild=args.rebuild,
+        model=cfg.embeddings.model,
+        batch_size=batch_size,
+        verbose=args.verbose,
+    )
+    client.close()
+    conn.close()
+
+    print(
+        f"embedded {report['embedded']} messages "
+        f"({report['skipped']} already embedded) "
+        f"in {report['elapsed']:.2f}s"
+    )
+    if report["errors"]:
+        print(f"  {report['errors']} batch(es) failed — see stderr", file=sys.stderr)
+        return 2
+    return 0
+
+
+def _run_embed(
+    conn: sqlite3.Connection,
+    client,
+    *,
+    project_slug: str | None,
+    rebuild: bool,
+    model: str,
+    batch_size: int,
+    verbose: bool,
+) -> dict:
+    import time
+    from datetime import UTC, datetime
+
+    if rebuild:
+        if project_slug:
+            conn.execute(
+                "DELETE FROM message_vectors "
+                "WHERE msg_id IN (SELECT m.msg_id FROM messages m "
+                "JOIN sessions s ON s.session_id = m.session_id "
+                "WHERE s.project_slug = ?)",
+                (project_slug,),
+            )
+        else:
+            conn.execute("DELETE FROM message_vectors")
+        conn.commit()
+
+    sql = (
+        "SELECT m.msg_id, m.content FROM messages m "
+        "LEFT JOIN message_vectors v ON v.msg_id = m.msg_id "
+        "JOIN sessions s ON s.session_id = m.session_id "
+        "WHERE v.msg_id IS NULL"
+    )
+    params: list = []
+    if project_slug:
+        sql += " AND s.project_slug = ?"
+        params.append(project_slug)
+    sql += " ORDER BY m.msg_id"
+
+    rows = conn.execute(sql, params).fetchall()
+    total_to_embed = len(rows)
+
+    already = conn.execute(
+        "SELECT COUNT(*) AS c FROM message_vectors"
+    ).fetchone()["c"]
+
+    start = time.monotonic()
+    embedded = 0
+    errors = 0
+    now_iso = datetime.now(UTC).isoformat()
+    from . import embeddings as _embeddings
+
+    for i in range(0, total_to_embed, batch_size):
+        batch = rows[i : i + batch_size]
+        texts = [r["content"] for r in batch]
+        try:
+            matrix = client.embed_batch(texts)
+        except _embeddings.EmbeddingError as exc:
+            errors += 1
+            print(
+                f"[embed] batch {i // batch_size} failed: {exc}",
+                file=sys.stderr,
+            )
+            continue
+
+        dim = int(matrix.shape[1])
+        to_insert = [
+            (
+                r["msg_id"],
+                _embeddings.pack_vector(matrix[j]),
+                model,
+                dim,
+                now_iso,
+            )
+            for j, r in enumerate(batch)
+        ]
+        conn.executemany(
+            "INSERT OR REPLACE INTO message_vectors"
+            "(msg_id, vector, model, dim, embedded_at) VALUES (?,?,?,?,?)",
+            to_insert,
+        )
+        conn.commit()
+        embedded += len(batch)
+        if verbose:
+            print(
+                f"[embed] {embedded}/{total_to_embed} ({dim}-dim)",
+                file=sys.stderr,
+            )
+
+    return {
+        "embedded": embedded,
+        "skipped": already,
+        "errors": errors,
+        "elapsed": time.monotonic() - start,
+    }
 
 
 # --- init-hooks -------------------------------------------------------------

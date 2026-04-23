@@ -2,6 +2,77 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.3.0 — 2026-04-23
+
+Optional semantic retrieval layer per [docs/EMBEDDINGS-PLAN.md](docs/EMBEDDINGS-PLAN.md).
+Hybrid retrieval (FTS5 candidate pool → embedding rerank). Opt-in via the
+`[embeddings]` pip extra and `[embeddings].enabled = true` in config.
+
+### Added
+
+- `claude_recall.embeddings` module (opt-in; requires the `[embeddings]`
+  extra). `OllamaClient` for `/api/embed` + `/api/version` + `/api/tags`,
+  with finite/non-zero/shape validation. `pack_vector` / `unpack_vector`
+  deterministic BLOB codec. `cosine_matrix` vectorized over a candidate pool.
+- `message_vectors` SQLite table alongside `messages` (cascade-deleted on
+  session re-index). Added unconditionally; unused when embeddings are off.
+- `claude-recall embed [--rebuild] [--probe] [--project auto]` command.
+  Incremental by default (embeds rows without an existing vector). `--probe`
+  exits 0 only on a full Ollama path check (reachable + model pulled + test
+  embed succeeds).
+- `claude-recall search --semantic` flag. Reranks top-`rerank_pool_size`
+  BM25 candidates by cosine against the query embedding. Pure rerank — BM25
+  determines the candidate pool, cosine re-orders it, BM25 rank is preserved
+  on the result for visibility.
+- `status` new fields: `embeddings_enabled`, `ollama_reachable`,
+  `vectors_indexed`, `messages_without_vectors`, `checks.embeddings_ready`.
+  agent-context output appends `Embeddings: <count> vectors, Ollama reachable`
+  when healthy, or an actionable hint when not (`run claude-recall embed`).
+- Graceful degradation: Ollama down / model missing / zero vectors all fall
+  back to FTS5-only results with `semantic_fallback_reason` set for CLI
+  visibility. The hook still emits valid JSON under every failure mode.
+- `SearchResult` gains `bm25_rank` and `semantic_rank` (populated only when
+  semantic rerank ran).
+
+### Changed
+
+- `--semantic-from-config` flag on `search` respects
+  `[embeddings].use_in_hook`. Shipped hook scripts pass this flag so hook
+  latency stays on the v0.2.1 fast path by default.
+- Hook-stamp version bumped; `status` will flag v0.2.1 hooks as stale on upgrade.
+
+### Known limitation — hook latency
+
+The `UserPromptSubmit` hook was originally designed to run `--semantic`
+unconditionally (PLAN §7 Fork 3 Option A). Real measurement showed
+semantic-enabled hook path runs ~685ms on warm-Ollama localhost, over the
+500ms budget from PLAN §7.3. Dominant cost is numpy + httpx cold-import
+(~240ms) plus Python subprocess overhead. v0.3.0 ships with
+`[embeddings].use_in_hook = false` default to preserve the 500ms budget
+as a hard guarantee. Users who have verified their setup can flip
+`use_in_hook = true` in `config.toml` to opt into semantic-in-hook.
+
+The proper fix — a compiled hook binary that eliminates the Python
+startup + import cost — lands in v0.4.0. See
+`docs/HOOK-BINARY-PLAN.md` (coming with v0.4 work) for the C# NativeAOT
+architecture.
+
+### Tests
+
+138 passing. `tests/test_embeddings.py` (21 unit + 1 live-ollama gated on
+`OLLAMA_LIVE=1`), `tests/test_semantic_search.py` (6 hybrid retrieval
+cases), expanded `tests/test_cli.py` and `tests/test_storage.py`. Coverage:
+embeddings 93%, search 97%, projects 94%, keywords 97%, storage 89%,
+indexer 85%, config 92%, cli 81%.
+
+### Deviations from PLAN
+
+- PLAN §17 Decision 1 (spacy for keyword extraction) — already deviated
+  in v0.2 per the concrete 500ms hook budget.
+- EMBEDDINGS-PLAN Fork 3 (hook uses semantic transparently) — partly
+  deferred via `use_in_hook=false` default, re-activated in v0.4.0 after
+  the C# hook binary ships.
+
 ## v0.2.1 — 2026-04-23
 
 Hook-delivery-layer fixes from [issue #2](https://github.com/LearnedGeek/claude-recall/issues/2).

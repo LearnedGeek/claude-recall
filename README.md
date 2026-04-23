@@ -2,7 +2,7 @@
 
 Automatic, cheap, precise query of your Claude Code session archive — wired into the prompt flow via hooks so you never have to remember to search.
 
-**Status:** v0.2.1 shipped. MVP + keyword extraction + auto project scoping + config-driven hook flags + stale-hook detection. See [docs/PLAN.md](docs/PLAN.md) for the original plan and [CHANGELOG.md](CHANGELOG.md) for what's landed since.
+**Status:** v0.3.0 shipped. MVP + keyword extraction + auto project scoping + config-driven hook flags + stale-hook detection + **opt-in semantic retrieval via Ollama**. See [docs/PLAN.md](docs/PLAN.md) for the original plan, [docs/EMBEDDINGS-PLAN.md](docs/EMBEDDINGS-PLAN.md) for the v0.3 feature plan, and [CHANGELOG.md](CHANGELOG.md) for what's landed.
 
 ---
 

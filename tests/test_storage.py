@@ -103,6 +103,43 @@ def test_fts5_probe_returns_false_on_error():
     assert storage.fts5_available(FakeConn()) is False
 
 
+def test_message_vectors_table_exists(db_conn):
+    """message_vectors is created unconditionally for v0.3 embeddings layer."""
+    row = db_conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='message_vectors'"
+    ).fetchone()
+    assert row is not None
+
+
+def test_message_vectors_cascade_on_session_delete(db_conn):
+    """Deleting a session removes its vectors via message → session ON DELETE CASCADE."""
+    now = datetime.now(UTC).isoformat()
+    db_conn.execute(
+        "INSERT INTO sessions(session_id, project_slug, file_path, file_mtime, "
+        "turn_count, indexed_at) VALUES (?,?,?,?,?,?)",
+        ("s1", "demo", "/tmp/demo.jsonl", 1.0, 0, now),
+    )
+    cur = db_conn.execute(
+        "INSERT INTO messages(session_id, role, content, turn_index) VALUES (?,?,?,?)",
+        ("s1", "user", "hello", 0),
+    )
+    msg_id = cur.lastrowid
+    db_conn.execute(
+        "INSERT INTO message_vectors(msg_id, vector, model, dim, embedded_at) "
+        "VALUES (?,?,?,?,?)",
+        (msg_id, b"\x00" * 12, "nomic-embed-text", 3, now),
+    )
+    db_conn.commit()
+
+    db_conn.execute("DELETE FROM sessions WHERE session_id=?", ("s1",))
+    db_conn.commit()
+
+    remaining = db_conn.execute(
+        "SELECT COUNT(*) AS c FROM message_vectors WHERE msg_id=?", (msg_id,)
+    ).fetchone()["c"]
+    assert remaining == 0
+
+
 def test_cascade_delete_removes_messages(db_conn):
     """Deleting a session removes its messages via ON DELETE CASCADE."""
     now = datetime.now(UTC).isoformat()

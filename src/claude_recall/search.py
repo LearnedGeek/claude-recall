@@ -44,6 +44,9 @@ class SearchResult:
     score: float
     snippet: str
     content_preview: str
+    # Populated only when semantic rerank ran; None otherwise.
+    bm25_rank: int | None = None
+    semantic_rank: int | None = None
 
 
 @dataclass
@@ -53,6 +56,8 @@ class SearchResponse:
     returned: int
     threshold: float
     results: list[SearchResult] = field(default_factory=list)
+    semantic_used: bool = False
+    semantic_fallback_reason: str | None = None
 
 
 def run_search(
@@ -63,8 +68,11 @@ def run_search(
     project_slug: str | None = None,
     threshold: float = 0.0,
     extract_keywords: bool = False,
+    semantic: bool = False,
+    ollama_client=None,
+    rerank_pool_size: int = 50,
 ) -> SearchResponse:
-    """Execute an FTS5 search and return ranked results.
+    """Execute an FTS5 search (optionally semantic-reranked) and return results.
 
     BM25 scores are returned from FTS5 as negative-ish numbers where smaller is
     more relevant. We negate so higher-is-better for the user-facing score, and
@@ -74,12 +82,23 @@ def run_search(
     pronouns, fillers) are stripped before the query reaches FTS5 and the
     remaining keywords are OR-joined with BM25 ranking. This is the v0.2 hook
     path. Direct CLI users leave it off to preserve exact-query semantics.
+
+    When ``semantic=True`` AND ``ollama_client`` is supplied, the top
+    ``rerank_pool_size`` BM25 hits are re-ranked by cosine similarity against
+    the query embedding, and the top ``limit`` are returned. Any Ollama
+    failure degrades silently to FTS5-only, with the reason surfaced on
+    ``SearchResponse.semantic_fallback_reason`` for the CLI to log.
     """
     if extract_keywords:
         extracted = _keywords.extract_keywords(query)
         fts_input = _keywords.build_fts_query(extracted) or query
     else:
         fts_input = query
+
+    # When semantic rerank is requested we need more candidates than the final
+    # limit so the rerank has something to work with. When disabled, the old
+    # behavior (no SQL LIMIT; apply Python-side) is preserved.
+    pool = max(limit, rerank_pool_size) if semantic and ollama_client else None
 
     cutoff_iso = (datetime.now(UTC) - timedelta(days=days)).isoformat()
     snippet_expr = (
@@ -89,6 +108,7 @@ def run_search(
 
     sql = f"""
         SELECT
+            m.msg_id,
             s.session_id,
             s.project_slug,
             s.started_at,
@@ -108,15 +128,19 @@ def run_search(
         sql += " AND s.project_slug = ?"
         tail_params.append(project_slug)
     sql += " ORDER BY bm25(messages_fts) ASC"
+    if pool is not None:
+        sql += f" LIMIT {int(pool)}"
 
     rows = _execute_with_fallback(conn, sql, fts_input, tail_params)
 
     results: list[SearchResult] = []
+    msg_ids: list[int] = []
     for row in rows:
         score = float(row["score"])
         if score < threshold:
             continue
         preview = _build_preview(row["content"])
+        msg_ids.append(int(row["msg_id"]))
         results.append(
             SearchResult(
                 session_id=row["session_id"],
@@ -130,6 +154,16 @@ def run_search(
             )
         )
 
+    semantic_used = False
+    fallback_reason: str | None = None
+    if semantic and ollama_client and results:
+        reranked, fallback_reason = _semantic_rerank(
+            conn, ollama_client, fts_input, msg_ids, results
+        )
+        if reranked is not None:
+            results = reranked
+            semantic_used = True
+
     total = len(results)
     returned = results[:limit]
     return SearchResponse(
@@ -138,7 +172,85 @@ def run_search(
         returned=len(returned),
         threshold=threshold,
         results=returned,
+        semantic_used=semantic_used,
+        semantic_fallback_reason=fallback_reason,
     )
+
+
+def _semantic_rerank(
+    conn: sqlite3.Connection,
+    client,
+    query_text: str,
+    msg_ids: list[int],
+    results: list[SearchResult],
+) -> tuple[list[SearchResult] | None, str | None]:
+    """Rerank ``results`` by cosine vs. the query embedding.
+
+    Returns (reranked_results, fallback_reason). If the semantic path fails
+    (no vectors, Ollama down, shape mismatch), returns (None, reason) so the
+    caller leaves the FTS5-only order in place and logs the reason.
+    """
+    try:
+        from . import embeddings as _embeddings
+    except ImportError as exc:
+        return None, f"[embeddings] extra not installed: {exc}"
+
+    # Load vectors for the pool. Missing rows keep their BM25 position.
+    placeholders = ",".join("?" for _ in msg_ids)
+    vec_rows = conn.execute(
+        f"SELECT msg_id, vector, dim FROM message_vectors "
+        f"WHERE msg_id IN ({placeholders})",
+        msg_ids,
+    ).fetchall()
+    if not vec_rows:
+        return None, "no vectors in index; run `claude-recall embed`"
+
+    by_id: dict[int, tuple[bytes, int]] = {
+        r["msg_id"]: (r["vector"], int(r["dim"])) for r in vec_rows
+    }
+
+    # Embed the query. Failure → fallback.
+    try:
+        q = client.embed(query_text)
+    except _embeddings.EmbeddingError as exc:
+        return None, f"Ollama embed failed: {exc}"
+
+    import numpy as np
+
+    # Build candidate matrix in result order; vectorless rows get -inf so
+    # they sort to the bottom on cosine but remain in the return set.
+    dim = int(q.shape[0])
+    indexed: list[tuple[int, float]] = []  # (original_idx, cosine_or_neg_inf)
+    vectors: list[np.ndarray] = []
+    kept_idx: list[int] = []
+    for i, mid in enumerate(msg_ids):
+        entry = by_id.get(mid)
+        if entry is None:
+            indexed.append((i, float("-inf")))
+            continue
+        blob, stored_dim = entry
+        if stored_dim != dim:
+            indexed.append((i, float("-inf")))
+            continue
+        vectors.append(_embeddings.unpack_vector(blob, dim))
+        kept_idx.append(i)
+
+    if vectors:
+        matrix = np.stack(vectors)
+        scores = _embeddings.cosine_matrix(q, matrix)
+        for k, orig_i in enumerate(kept_idx):
+            indexed.append((orig_i, float(scores[k])))
+
+    # Sort indexed by semantic score desc, stable; record original bm25 rank.
+    indexed.sort(key=lambda t: (-t[1], t[0]))
+
+    reranked: list[SearchResult] = []
+    for new_rank, (orig_i, _score) in enumerate(indexed):
+        r = results[orig_i]
+        r.bm25_rank = orig_i
+        r.semantic_rank = new_rank
+        reranked.append(r)
+    return reranked, None
 
 
 def _execute_with_fallback(

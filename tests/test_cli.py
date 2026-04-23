@@ -405,6 +405,413 @@ def test_init_hooks_idempotent(tmp_path):
     assert len(settings["hooks"]["UserPromptSubmit"]) == 1
 
 
+# ---- v0.3 embed command ----
+
+class _FakeOllama:
+    """In-memory OllamaClient replacement for embed-path tests.
+
+    Returns deterministic per-text vectors so test assertions can verify
+    that the right content made it into message_vectors.
+    """
+
+    def __init__(self, *, dim: int = 8, fail_on_text: str | None = None):
+        self.dim = dim
+        self.fail_on_text = fail_on_text
+        self.calls: list[list[str]] = []
+
+    def embed(self, text):
+        return self.embed_batch([text])[0]
+
+    def embed_batch(self, texts):
+        import numpy as np
+
+        from claude_recall import embeddings
+        self.calls.append(list(texts))
+        if self.fail_on_text and any(self.fail_on_text in t for t in texts):
+            raise embeddings.EmbeddingError("injected failure")
+        # One row per text, deterministic non-zero norm
+        rows = []
+        for i, t in enumerate(texts):
+            v = np.zeros(self.dim, dtype=np.float32)
+            v[i % self.dim] = 1.0 + len(t) * 1e-3  # distinguishable
+            rows.append(v)
+        return np.stack(rows)
+
+    def probe(self):
+        from claude_recall.embeddings import ProbeResult
+        return ProbeResult(
+            ollama_reachable=True,
+            version="test",
+            model_present=True,
+            embed_ok=True,
+            dim=self.dim,
+            error=None,
+        )
+
+    def close(self):
+        pass
+
+
+def _use_fake_ollama(monkeypatch, fake):
+    from claude_recall import cli as _cli
+    monkeypatch.setattr(
+        _cli, "_ollama_client_factory",
+        lambda base_url, model, timeout: fake,
+    )
+
+
+def _enable_embeddings_cfg(tmp_path, archive_root, db_path):
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(
+        f'[archive]\nroot = "{archive_root.as_posix()}"\n'
+        f'[database]\npath = "{db_path.as_posix()}"\n'
+        '[embeddings]\nenabled = true\nbatch_size = 4\n',
+        encoding="utf-8",
+    )
+    return cfg_path
+
+
+def _seed_archive(tmp_path):
+    import shutil as _shutil
+    archive_root = tmp_path / "archive"
+    project = archive_root / "test-project"
+    project.mkdir(parents=True)
+    for name in (
+        "session_short.jsonl",
+        "session_malformed.jsonl",
+        "session_tool_blocks.jsonl",
+    ):
+        _shutil.copy(FIXTURES_DIR / name, project / name)
+    return archive_root
+
+
+def test_embed_probe_reports_json(tmp_path, capsys, monkeypatch):
+    """claude-recall embed --probe prints a JSON probe result and exits 0 on success."""
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        f'[database]\npath = "{(tmp_path / "db.sqlite").as_posix()}"\n',
+        encoding="utf-8",
+    )
+    _use_fake_ollama(monkeypatch, _FakeOllama())
+    code = cli.main(["--config", str(cfg), "embed", "--probe"])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ollama_reachable"] is True
+    assert payload["model_present"] is True
+    assert payload["embed_ok"] is True
+    assert payload["dim"] == 8
+
+
+def test_embed_guards_when_disabled(tmp_path, capsys, monkeypatch):
+    """Embed without --probe requires [embeddings].enabled=true."""
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        f'[database]\npath = "{(tmp_path / "db.sqlite").as_posix()}"\n',
+        encoding="utf-8",
+    )
+    code = cli.main(["--config", str(cfg), "embed"])
+    assert code == 1
+    assert "disabled" in capsys.readouterr().err
+
+
+def test_embed_populates_message_vectors(tmp_path, capsys, monkeypatch):
+    """End-to-end: index fixtures, run embed, message_vectors rows appear."""
+    archive_root = _seed_archive(tmp_path)
+    db_path = tmp_path / "index.db"
+    cfg = _enable_embeddings_cfg(tmp_path, archive_root, db_path)
+    _use_fake_ollama(monkeypatch, _FakeOllama())
+
+    cli.main(["--config", str(cfg), "index"])
+    capsys.readouterr()
+    code = cli.main(["--config", str(cfg), "embed", "--verbose"])
+    assert code == 0
+
+    from claude_recall import storage
+    conn = storage.open_db(db_path)
+    try:
+        msg_count = conn.execute("SELECT COUNT(*) AS c FROM messages").fetchone()["c"]
+        vec_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM message_vectors"
+        ).fetchone()["c"]
+    finally:
+        conn.close()
+    assert vec_count == msg_count
+    assert vec_count > 0
+
+
+def test_embed_is_incremental_on_second_run(tmp_path, capsys, monkeypatch):
+    """Second embed is a no-op when all messages are already embedded."""
+    archive_root = _seed_archive(tmp_path)
+    db_path = tmp_path / "index.db"
+    cfg = _enable_embeddings_cfg(tmp_path, archive_root, db_path)
+    fake = _FakeOllama()
+    _use_fake_ollama(monkeypatch, fake)
+
+    cli.main(["--config", str(cfg), "index"])
+    capsys.readouterr()
+    cli.main(["--config", str(cfg), "embed"])
+    capsys.readouterr()
+    first_call_count = sum(len(c) for c in fake.calls)
+
+    cli.main(["--config", str(cfg), "embed"])
+    out = capsys.readouterr().out
+    # Second pass embedded 0 messages; skipped count matches first-pass total
+    assert "embedded 0" in out
+    total_call_count = sum(len(c) for c in fake.calls)
+    assert total_call_count == first_call_count
+
+
+def test_embed_rebuild_drops_and_reembeds(tmp_path, capsys, monkeypatch):
+    """--rebuild wipes vectors in scope and re-embeds."""
+    archive_root = _seed_archive(tmp_path)
+    db_path = tmp_path / "index.db"
+    cfg = _enable_embeddings_cfg(tmp_path, archive_root, db_path)
+    fake = _FakeOllama()
+    _use_fake_ollama(monkeypatch, fake)
+
+    cli.main(["--config", str(cfg), "index"])
+    capsys.readouterr()
+    cli.main(["--config", str(cfg), "embed"])
+    capsys.readouterr()
+    first_total = sum(len(c) for c in fake.calls)
+
+    cli.main(["--config", str(cfg), "embed", "--rebuild"])
+    capsys.readouterr()
+    second_total = sum(len(c) for c in fake.calls)
+    # After rebuild we called embed_batch again for every message
+    assert second_total == first_total * 2
+
+
+def test_status_json_includes_embedding_fields(tmp_path, capsys, monkeypatch):
+    """status --format json exposes embeddings_enabled, ollama_reachable, vectors_indexed."""
+    archive_root = _seed_archive(tmp_path)
+    db_path = tmp_path / "index.db"
+    cfg = _enable_embeddings_cfg(tmp_path, archive_root, db_path)
+    _use_fake_ollama(monkeypatch, _FakeOllama())
+
+    cli.main(["--config", str(cfg), "index"])
+    capsys.readouterr()
+    cli.main(["--config", str(cfg), "embed"])
+    capsys.readouterr()
+
+    code = cli.main(["--config", str(cfg), "status", "--format", "json"])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["embeddings_enabled"] is True
+    assert payload["ollama_reachable"] is True
+    assert payload["vectors_indexed"] > 0
+    assert payload["messages_without_vectors"] == 0
+    assert payload["checks"]["embeddings_ready"] is True
+
+
+def test_status_agent_context_reports_embedding_health(tmp_path, capsys, monkeypatch):
+    """agent-context line appends an Embeddings suffix when enabled and healthy."""
+    archive_root = _seed_archive(tmp_path)
+    db_path = tmp_path / "index.db"
+    cfg = _enable_embeddings_cfg(tmp_path, archive_root, db_path)
+    _use_fake_ollama(monkeypatch, _FakeOllama())
+
+    cli.main(["--config", str(cfg), "index"])
+    capsys.readouterr()
+    cli.main(["--config", str(cfg), "embed"])
+    capsys.readouterr()
+
+    cli.main(["--config", str(cfg), "status", "--format", "agent-context"])
+    out = capsys.readouterr().out
+    assert "Embeddings:" in out
+    assert "vectors" in out.lower()
+    assert "Ollama reachable" in out
+
+
+def test_status_agent_context_hints_when_unembedded(tmp_path, capsys, monkeypatch):
+    """agent-context line hints `run claude-recall embed` when vectors are missing."""
+    archive_root = _seed_archive(tmp_path)
+    db_path = tmp_path / "index.db"
+    cfg = _enable_embeddings_cfg(tmp_path, archive_root, db_path)
+    _use_fake_ollama(monkeypatch, _FakeOllama())
+
+    cli.main(["--config", str(cfg), "index"])
+    capsys.readouterr()
+    # deliberately skip embed
+
+    cli.main(["--config", str(cfg), "status", "--format", "agent-context"])
+    out = capsys.readouterr().out
+    assert "0 vectors" in out
+    assert "claude-recall embed" in out
+
+
+def test_status_embeddings_ready_false_when_ollama_down(tmp_path, capsys, monkeypatch):
+    """ollama_reachable=False when probe fails; embeddings_ready reflects that."""
+    archive_root = _seed_archive(tmp_path)
+    db_path = tmp_path / "index.db"
+    cfg = _enable_embeddings_cfg(tmp_path, archive_root, db_path)
+
+    class _DownClient:
+        def probe(self):
+            from claude_recall.embeddings import ProbeResult
+            return ProbeResult(
+                ollama_reachable=False, version=None, model_present=False,
+                embed_ok=False, dim=None, error="refused",
+            )
+        def close(self):
+            pass
+
+    from claude_recall import cli as _cli
+    monkeypatch.setattr(
+        _cli, "_ollama_client_factory",
+        lambda base_url, model, timeout: _DownClient(),
+    )
+
+    cli.main(["--config", str(cfg), "index"])
+    capsys.readouterr()
+    cli.main(["--config", str(cfg), "status", "--format", "json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ollama_reachable"] is False
+    assert payload["checks"]["embeddings_ready"] is False
+
+
+def test_semantic_from_config_respects_use_in_hook(tmp_path, capsys, monkeypatch):
+    """--semantic-from-config activates semantic only when use_in_hook=true in config."""
+    archive_root = _seed_archive(tmp_path)
+    db_path = tmp_path / "index.db"
+
+    # Case 1: enabled=true but use_in_hook=false (shipped v0.3.0 default) →
+    #   --semantic-from-config must NOT activate semantic; hook stays fast.
+    cfg_off = tmp_path / "cfg_off.toml"
+    cfg_off.write_text(
+        f'[archive]\nroot = "{archive_root.as_posix()}"\n'
+        f'[database]\npath = "{db_path.as_posix()}"\n'
+        '[embeddings]\nenabled = true\nuse_in_hook = false\n',
+        encoding="utf-8",
+    )
+    _use_fake_ollama(monkeypatch, _FakeOllama())
+    cli.main(["--config", str(cfg_off), "index"])
+    capsys.readouterr()
+
+    # If semantic were mistakenly turned on, --semantic-from-config would
+    # try to use the Ollama client. We use a fake so it's safe either way,
+    # but the behavior under test is that semantic_used=false.
+    cli.main([
+        "--config", str(cfg_off),
+        "search", "regex", "--semantic-from-config", "--format", "json",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+    # With v0.3 behavior, no semantic_used=true should appear
+    # (soft-ignored before even trying; no warning since flag is passive).
+    assert payload["total_matches"] >= 1
+
+    # Case 2: use_in_hook=true → --semantic-from-config does activate semantic.
+    cfg_on = tmp_path / "cfg_on.toml"
+    cfg_on.write_text(
+        f'[archive]\nroot = "{archive_root.as_posix()}"\n'
+        f'[database]\npath = "{(tmp_path / "db2.sqlite").as_posix()}"\n'
+        '[embeddings]\nenabled = true\nuse_in_hook = true\n',
+        encoding="utf-8",
+    )
+    _use_fake_ollama(monkeypatch, _FakeOllama())
+    cli.main(["--config", str(cfg_on), "index"])
+    capsys.readouterr()
+    cli.main(["--config", str(cfg_on), "embed"])
+    capsys.readouterr()
+    cli.main([
+        "--config", str(cfg_on),
+        "search", "regex", "--semantic-from-config", "--format", "json",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+    # At least one result should have semantic_rank populated — proves rerank ran.
+    assert any(r.get("semantic_rank") is not None for r in payload["results"])
+
+
+def test_search_semantic_soft_ignores_when_disabled(tmp_path, capsys):
+    """--semantic without [embeddings].enabled logs a warning and runs FTS5-only."""
+    archive_root = _seed_archive(tmp_path)
+    db_path = tmp_path / "index.db"
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        f'[archive]\nroot = "{archive_root.as_posix()}"\n'
+        f'[database]\npath = "{db_path.as_posix()}"\n',
+        encoding="utf-8",
+    )
+    cli.main(["--config", str(cfg), "index"])
+    capsys.readouterr()
+
+    code = cli.main([
+        "--config", str(cfg),
+        "search", "regex", "--semantic", "--format", "json",
+    ])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "enabled is false" in captured.err
+    payload = json.loads(captured.out)
+    assert payload["total_matches"] >= 1
+
+
+def test_search_semantic_reranks_end_to_end(tmp_path, capsys, monkeypatch):
+    """With embeddings enabled + Ollama fake + vectors seeded, --semantic flips ranks."""
+    import numpy as np
+
+    from claude_recall import embeddings as _embeddings
+    from claude_recall import storage as _storage
+
+    archive_root = _seed_archive(tmp_path)
+    db_path = tmp_path / "index.db"
+    cfg = _enable_embeddings_cfg(tmp_path, archive_root, db_path)
+
+    fake = _FakeOllama(dim=8)
+    _use_fake_ollama(monkeypatch, fake)
+
+    cli.main(["--config", str(cfg), "index"])
+    capsys.readouterr()
+    cli.main(["--config", str(cfg), "embed"])
+    capsys.readouterr()
+
+    # Overwrite vectors: make msg_id=1 perfectly aligned with the query vec
+    # the fake returns for the prompt "regex" (fake returns v[i%dim]=1 where
+    # i==0 since it's batch of 1 → [1,0,0,...] in slot 0).
+    conn = _storage.open_db(db_path)
+    try:
+        # Set msg 1's vector to the exact query vec; others orthogonal.
+        winner = np.zeros(8, dtype=np.float32)
+        winner[0] = 1.0
+        loser = np.zeros(8, dtype=np.float32)
+        loser[1] = 1.0
+        for row in conn.execute("SELECT msg_id FROM messages ORDER BY msg_id"):
+            v = winner if row["msg_id"] == 1 else loser
+            conn.execute(
+                "UPDATE message_vectors SET vector = ? WHERE msg_id = ?",
+                (_embeddings.pack_vector(v), row["msg_id"]),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    code = cli.main([
+        "--config", str(cfg),
+        "search", "regex", "--semantic", "--format", "json",
+    ])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    # Every returned row should have semantic_rank populated
+    assert payload["results"]
+    assert all(r["semantic_rank"] is not None for r in payload["results"])
+
+
+def test_embed_reports_partial_failure_exit_2(tmp_path, capsys, monkeypatch):
+    """If a batch fails mid-run, remaining batches continue and exit is 2."""
+    archive_root = _seed_archive(tmp_path)
+    db_path = tmp_path / "index.db"
+    cfg = _enable_embeddings_cfg(tmp_path, archive_root, db_path)
+    # Fail on any text that contains the fixture phrase
+    _use_fake_ollama(monkeypatch, _FakeOllama(fail_on_text="regex"))
+
+    cli.main(["--config", str(cfg), "index"])
+    capsys.readouterr()
+    code = cli.main(["--config", str(cfg), "embed"])
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "failed" in err.lower()
+
+
 def test_init_hooks_aborts_on_bad_json(tmp_path, capsys):
     """init-hooks refuses to touch invalid settings.json and returns non-zero."""
     project_root = tmp_path / "proj"

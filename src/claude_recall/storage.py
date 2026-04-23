@@ -77,6 +77,20 @@ END;
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY
 );
+
+-- v0.3 embeddings layer. Added unconditionally; unused when [embeddings].enabled=false.
+-- See docs/EMBEDDINGS-PLAN.md §5 for the full rationale.
+CREATE TABLE IF NOT EXISTS message_vectors (
+    msg_id       INTEGER PRIMARY KEY,
+    vector       BLOB    NOT NULL,
+    model        TEXT    NOT NULL,
+    dim          INTEGER NOT NULL,
+    embedded_at  TEXT    NOT NULL,
+    FOREIGN KEY (msg_id) REFERENCES messages(msg_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_message_vectors_model
+    ON message_vectors(model, dim);
 """
 
 
