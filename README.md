@@ -2,7 +2,7 @@
 
 Automatic, cheap, precise query of your Claude Code session archive — wired into the prompt flow via hooks so you never have to remember to search.
 
-**Status:** v0.4.0 shipped. MVP + keyword extraction + auto project scoping + config-driven hook flags + stale-hook detection + opt-in semantic retrieval via Ollama + **NativeAOT C# hook binary for sub-100ms semantic-enabled hooks on Windows**. See [docs/PLAN.md](docs/PLAN.md) for the original plan, [docs/EMBEDDINGS-PLAN.md](docs/EMBEDDINGS-PLAN.md) / [docs/HOOK-BINARY-PLAN.md](docs/HOOK-BINARY-PLAN.md) for feature plans, and [CHANGELOG.md](CHANGELOG.md) for what's landed.
+**Status:** v0.4.1 shipped. MVP + keyword extraction + auto project scoping + config-driven hook flags + stale-hook detection + opt-in semantic retrieval via Ollama + **NativeAOT C# hook binary for sub-100ms semantic-enabled hooks on Windows**. See [docs/PLAN.md](docs/PLAN.md) for the original plan, [docs/EMBEDDINGS-PLAN.md](docs/EMBEDDINGS-PLAN.md) / [docs/HOOK-BINARY-PLAN.md](docs/HOOK-BINARY-PLAN.md) for feature plans, and [CHANGELOG.md](CHANGELOG.md) for what's landed.
 
 ---
 
@@ -25,7 +25,7 @@ Not on PyPI yet — v0.5 target. Until then, install from a GitHub Release wheel
 **Windows x64** (gets the NativeAOT hook binary bundled for ~80ms semantic hooks):
 
 ```bash
-pip install --upgrade "claude_recall[embeddings] @ https://github.com/LearnedGeek/claude-recall/releases/download/v0.4.0/claude_recall-0.4.0-py3-none-win_amd64.whl"
+pip install --upgrade "claude_recall[embeddings] @ https://github.com/LearnedGeek/claude-recall/releases/download/v0.4.1/claude_recall-0.4.0-py3-none-win_amd64.whl"
 claude-recall init-hooks
 claude-recall index
 ```
@@ -33,7 +33,7 @@ claude-recall index
 **macOS / Linux** (pure-Python wheel — shell-hook fallback path, no compiled binary yet):
 
 ```bash
-pip install --upgrade "claude_recall[embeddings] @ https://github.com/LearnedGeek/claude-recall/releases/download/v0.4.0/claude_recall-0.4.0-py3-none-any.whl"
+pip install --upgrade "claude_recall[embeddings] @ https://github.com/LearnedGeek/claude-recall/releases/download/v0.4.1/claude_recall-0.4.0-py3-none-any.whl"
 claude-recall init-hooks
 claude-recall index
 ```

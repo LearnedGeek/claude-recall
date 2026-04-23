@@ -339,6 +339,103 @@ def test_init_hooks_uses_native_binary_when_present(tmp_path, monkeypatch):
     assert any("claude-recall-hook.exe" in c for c in ups_cmds)
 
 
+def test_init_hooks_fails_cleanly_when_wheel_missing_sources(
+    tmp_path, monkeypatch, capsys
+):
+    """Issue #3 regression: a wheel missing BOTH the binary and on_prompt shell
+    scripts used to crash with a raw FileNotFoundError. Must now return 1 with
+    a clear user-facing message pointing at both expected paths."""
+    from claude_recall import cli as _cli
+
+    empty = tmp_path / "empty_hooks"
+    empty.mkdir()
+    (empty / "__init__.py").write_text("", encoding="utf-8")
+    no_native = tmp_path / "empty_native"
+    no_native.mkdir()
+    monkeypatch.setattr(_cli, "HOOKS_SRC_DIR", empty)
+    monkeypatch.setattr(_cli, "NATIVE_SRC_DIR", no_native)
+
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    code = cli.main(["init-hooks", "--project-root", str(project_root)])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "missing hook sources" in err
+    assert "claude-recall-hook.exe" in err
+    # No settings.json should be written.
+    assert not (project_root / ".claude" / "settings.json").exists()
+
+
+def test_init_hooks_binary_only_wheel_skips_session_start(tmp_path, monkeypatch, capsys):
+    """If wheel has the binary but is missing session_start.ps1, init-hooks
+    should still wire UserPromptSubmit and warn cleanly about SessionStart."""
+    import sys as _sys
+    if _sys.platform != "win32":
+        pytest.skip("binary-only wheel scenario is win-x64 only")
+
+    from claude_recall import cli as _cli
+
+    bin_only = tmp_path / "bin_only_native"
+    bin_only.mkdir()
+    (bin_only / "claude-recall-hook.exe").write_bytes(b"MZ stub")
+    empty_hooks = tmp_path / "empty_hooks"
+    empty_hooks.mkdir()
+    (empty_hooks / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(_cli, "HOOKS_SRC_DIR", empty_hooks)
+    monkeypatch.setattr(_cli, "NATIVE_SRC_DIR", bin_only)
+
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    code = cli.main(["init-hooks", "--project-root", str(project_root)])
+    err = capsys.readouterr().err
+    assert code == 0
+    assert "SessionStart hook will not be registered" in err
+
+    settings = json.loads(
+        (project_root / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    # UserPromptSubmit is wired at the binary; SessionStart absent from settings.
+    assert "SessionStart" not in settings["hooks"]
+    ups_cmds = [e["command"] for e in settings["hooks"]["UserPromptSubmit"]]
+    assert any("claude-recall-hook.exe" in c for c in ups_cmds)
+
+
+def test_init_hooks_pure_python_wheel_wires_shell_hook(tmp_path, monkeypatch):
+    """Non-Windows (or Windows pure-Python) wheels use the shell hook for
+    on_prompt. Must still work end-to-end when the binary is absent."""
+    from claude_recall import cli as _cli
+    no_native = tmp_path / "no_native"
+    no_native.mkdir()
+    monkeypatch.setattr(_cli, "NATIVE_SRC_DIR", no_native)
+
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    code = cli.main(["init-hooks", "--project-root", str(project_root)])
+    assert code == 0
+
+    hooks_dir = project_root / ".claude" / "hooks"
+    # On this machine the shell scripts are the real ones from the repo
+    # package dir (HOOKS_SRC_DIR default).
+    if _sys_win():
+        assert (hooks_dir / "on_prompt.ps1").exists()
+        assert (hooks_dir / "session_start.ps1").exists()
+    else:
+        assert (hooks_dir / "on_prompt.sh").exists()
+        assert (hooks_dir / "session_start.sh").exists()
+
+    settings = json.loads(
+        (project_root / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    ups_cmds = [e["command"] for e in settings["hooks"]["UserPromptSubmit"]]
+    # Shell hook, not .exe
+    assert all("claude-recall-hook.exe" not in c for c in ups_cmds)
+
+
+def _sys_win() -> bool:
+    import sys as _sys
+    return _sys.platform == "win32"
+
+
 def test_init_hooks_writes_version_stamp(tmp_path):
     """init-hooks writes the installed package version alongside the scripts."""
     from claude_recall import __version__ as pkg_version

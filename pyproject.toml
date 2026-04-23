@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-recall"
-version = "0.4.0"
+version = "0.4.1"
 description = "Automatic, cheap, precise query of Claude Code session archives via SQLite FTS5 + hooks."
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -51,11 +51,21 @@ where = ["src"]
 include = ["claude_recall*"]
 
 [tool.setuptools.package-data]
-# Ship the NativeAOT hook binary + its SQLite sidecar as package data on
-# platforms where it's been built. GH Actions produces win-x64 wheels with
-# these files populated; pure-Python wheels omit them and fall back to the
-# Python-CLI shell hook.
-claude_recall = ["native/*.exe", "native/*.dll"]
+# Ship hook shell wrappers + (on Windows) the NativeAOT binary as package
+# data. setuptools does not auto-include non-Python files in a package
+# directory, so they must be listed here explicitly — v0.4.0 was broken
+# because this list only had native/* (issue #3).
+#
+# - hooks/*.ps1, hooks/*.sh: always present; SessionStart always uses the
+#   shell wrapper, and on non-Windows on_prompt.{ps1,sh} is the hook path.
+# - native/*.exe, native/*.dll: only populated on CI win-x64 builds, but
+#   the glob matches zero files on other platforms and that's fine.
+claude_recall = [
+    "hooks/*.ps1",
+    "hooks/*.sh",
+    "native/*.exe",
+    "native/*.dll",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -2,6 +2,51 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.4.1 — 2026-04-23
+
+Bugfix for [issue #3](https://github.com/LearnedGeek/claude-recall/issues/3):
+v0.4.0 wheels shipped without any `hooks/*.ps1` or `hooks/*.sh` files
+because the `package-data` glob in `pyproject.toml` only listed `native/*`.
+`claude-recall init-hooks --force` crashed with an unhelpful
+`FileNotFoundError` stack trace on every v0.4.0 wheel install.
+
+### Fixed
+
+- `pyproject.toml`: `claude_recall` package-data now includes
+  `hooks/*.ps1` and `hooks/*.sh`, so wheels actually contain the shell
+  scripts that existed in the repo all along. v0.4.0 source installs
+  (`pip install -e .`) worked by accident; wheel installs did not.
+- `claude-recall init-hooks` checks each expected source file before
+  copying instead of assuming it exists. Missing `on_prompt.{ps1,sh}` on
+  a binary-present wheel is OK (binary handles UserPromptSubmit); missing
+  `session_start.{ps1,sh}` emits a stderr warning and skips the hook
+  rather than crashing. Missing *both* binary and `on_prompt` exits 1
+  with an actionable message naming both expected paths.
+
+### Tests
+
+- 3 new CLI tests cover: (1) wheel missing everything → clean exit 1,
+  (2) binary-only wheel → UserPromptSubmit wired, SessionStart warned,
+  (3) pure-Python wheel → shell hook wired. 141 Python tests passing
+  (+ C# 62).
+
+### Upgrading from v0.4.0
+
+```bash
+# Windows x64
+pip install --upgrade "claude_recall[embeddings] @ https://github.com/LearnedGeek/claude-recall/releases/download/v0.4.1/claude_recall-0.4.1-py3-none-win_amd64.whl"
+claude-recall init-hooks --force
+
+# macOS / Linux
+pip install --upgrade "claude_recall[embeddings] @ https://github.com/LearnedGeek/claude-recall/releases/download/v0.4.1/claude_recall-0.4.1-py3-none-any.whl"
+claude-recall init-hooks --force
+```
+
+If you hit the `FileNotFoundError` on v0.4.0 and manually wired
+`settings.json` to bypass it, `init-hooks --force` on v0.4.1 will
+overwrite your hand-edit with the correct generated content and write a
+`settings.json.bak` of the manual version.
+
 ## v0.4.0 — 2026-04-23
 
 Compiled C# hook binary replaces the Python-CLI-based UserPromptSubmit path

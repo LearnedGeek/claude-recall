@@ -819,47 +819,74 @@ def _cmd_init_hooks(args: argparse.Namespace, cfg: Config) -> int:
     hooks_dir = claude_dir / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
 
-    # Detect whether the compiled hook binary shipped with this install.
+    # Detect what the installed wheel actually provides. The v0.4.0 bug
+    # (issue #3) was that this function assumed shell scripts were always
+    # present; now we check each file and surface a clear error if the
+    # wheel is missing everything it needs.
     bundled_binary = _native_hook_binary()
+    session_start_name = (
+        "session_start.ps1" if sys.platform == "win32" else "session_start.sh"
+    )
+    on_prompt_name = (
+        "on_prompt.ps1" if sys.platform == "win32" else "on_prompt.sh"
+    )
+    session_start_src = HOOKS_SRC_DIR / session_start_name
+    on_prompt_src = HOOKS_SRC_DIR / on_prompt_name
 
-    if sys.platform == "win32":
-        script_names = ["session_start.ps1", "on_prompt.ps1"]
-        session_start_cmd = str(hooks_dir / "session_start.ps1")
-    else:
-        script_names = ["session_start.sh", "on_prompt.sh"]
-        session_start_cmd = str(hooks_dir / "session_start.sh")
+    have_session_start = session_start_src.is_file()
+    have_on_prompt = on_prompt_src.is_file()
+    have_binary = bundled_binary is not None
 
-    if bundled_binary is not None:
-        # Fast path: C# binary replaces the on_prompt shell wrapper.
-        # SessionStart still runs as a shell script (not latency-critical).
-        if sys.platform == "win32":
-            script_names = ["session_start.ps1"]
-        else:
-            script_names = ["session_start.sh"]
-        on_prompt_cmd = str(hooks_dir / "claude-recall-hook.exe")
-    else:
-        # Pure-Python wheel: on_prompt stays a shell wrapper that shells out
-        # to the Python CLI. Existing v0.3 behavior.
-        if sys.platform == "win32":
-            on_prompt_cmd = str(hooks_dir / "on_prompt.ps1")
-        else:
-            on_prompt_cmd = str(hooks_dir / "on_prompt.sh")
+    # Hard requirement: we need SOMETHING to wire as UserPromptSubmit. If the
+    # installed wheel has neither the binary nor the on_prompt shell script,
+    # there's nothing we can do — explain it loudly instead of crashing.
+    if not have_binary and not have_on_prompt:
+        print(
+            "claude-recall init-hooks: installed wheel is missing hook sources.\n"
+            f"  Expected one of:\n"
+            f"    {NATIVE_SRC_DIR / 'claude-recall-hook.exe'}\n"
+            f"    {on_prompt_src}\n"
+            f"  Neither exists. Re-install from a GitHub Release wheel "
+            "(see README.md install section) or rebuild locally.",
+            file=sys.stderr,
+        )
+        return 1
 
-    for name in script_names:
-        src = HOOKS_SRC_DIR / name
-        dst = hooks_dir / name
+    # Copy whichever sources are present.
+    copied: list[Path] = []
+
+    def _copy_if_present(src: Path, dst: Path, *, label: str) -> bool:
+        if not src.is_file():
+            return False
         if dst.exists() and not args.force:
             print(
-                f"skipping existing hook: {dst} (use --force to overwrite)",
+                f"skipping existing {label}: {dst} (use --force to overwrite)",
                 file=sys.stderr,
             )
-            continue
+            return True
         shutil.copyfile(src, dst)
         if sys.platform != "win32":
             dst.chmod(0o755)
+        copied.append(dst)
+        return True
 
-    # Copy the native binary (and its SQLite sidecar, if present).
-    if bundled_binary is not None:
+    # SessionStart hook is always a shell script — not latency-critical.
+    if have_session_start:
+        _copy_if_present(
+            session_start_src, hooks_dir / session_start_name,
+            label="SessionStart hook",
+        )
+        session_start_cmd: str | None = str(hooks_dir / session_start_name)
+    else:
+        print(
+            f"claude-recall init-hooks: {session_start_src.name} missing from wheel; "
+            "SessionStart hook will not be registered.",
+            file=sys.stderr,
+        )
+        session_start_cmd = None
+
+    # UserPromptSubmit: prefer the binary when present, fall back to shell.
+    if have_binary:
         exe_dst = hooks_dir / "claude-recall-hook.exe"
         if exe_dst.exists() and not args.force:
             print(
@@ -868,9 +895,17 @@ def _cmd_init_hooks(args: argparse.Namespace, cfg: Config) -> int:
             )
         else:
             shutil.copyfile(bundled_binary, exe_dst)
+            copied.append(exe_dst)
         sidecar = NATIVE_SRC_DIR / "e_sqlite3.dll"
         if sidecar.is_file():
             shutil.copyfile(sidecar, hooks_dir / "e_sqlite3.dll")
+        on_prompt_cmd = str(exe_dst)
+    else:
+        _copy_if_present(
+            on_prompt_src, hooks_dir / on_prompt_name,
+            label="UserPromptSubmit hook",
+        )
+        on_prompt_cmd = str(hooks_dir / on_prompt_name)
 
     settings_path = claude_dir / SETTINGS_FILENAME
     if settings_path.exists():
@@ -891,7 +926,8 @@ def _cmd_init_hooks(args: argparse.Namespace, cfg: Config) -> int:
         settings = {}
 
     hooks_block = settings.setdefault("hooks", {})
-    _merge_hook(hooks_block, "SessionStart", session_start_cmd, matcher="startup|resume")
+    if session_start_cmd is not None:
+        _merge_hook(hooks_block, "SessionStart", session_start_cmd, matcher="startup|resume")
     _merge_hook(hooks_block, "UserPromptSubmit", on_prompt_cmd, matcher=None)
 
     settings_path.write_text(
