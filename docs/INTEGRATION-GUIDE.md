@@ -54,9 +54,12 @@ This walks `~/.claude/projects/*/*.jsonl`, extracts messages, and writes them to
 Confirm:
 
 ```bash
-claude-recall status
-# claude-recall: 87 sessions, 12,402 messages indexed, most recent 2026-04-22T20:47Z
+claude-recall status --format agent-context
+# claude-recall: 87 sessions, 12,402 messages indexed, most recent 2026-04-22T20:47
 ```
+
+(Plain `claude-recall status` prints the full multi-line health report with
+archive/db paths, schema version, and per-check booleans.)
 
 ---
 

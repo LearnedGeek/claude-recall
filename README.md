@@ -2,7 +2,7 @@
 
 Automatic, cheap, precise query of your Claude Code session archive — wired into the prompt flow via hooks so you never have to remember to search.
 
-**Status:** Design + scaffolding. MVP implementation pending. See [docs/PLAN.md](docs/PLAN.md) for the full implementation plan.
+**Status:** v0.1.0 MVP shipped. Indexer, CLI, hooks, and tests all green. See [docs/PLAN.md](docs/PLAN.md) for the implementation plan.
 
 ---
 
@@ -18,10 +18,12 @@ Claude Code writes every session to `~/.claude/projects/<project-slug>/<session-
 
 ---
 
-## Install (placeholder — not yet published)
+## Install
+
+Not on PyPI yet — v0.2.0 target. For now, install from source:
 
 ```bash
-pip install claude-recall
+pip install git+https://github.com/LearnedGeek/claude-recall.git
 claude-recall init-hooks        # wires hooks into the current project's .claude/settings.json
 claude-recall index             # first-time index of the session archive
 ```
