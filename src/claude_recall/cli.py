@@ -53,6 +53,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("--threshold", type=float, default=0.0)
     p_search.add_argument("--format", choices=["json", "text"], default="text")
     p_search.add_argument("--agent-context", action="store_true")
+    p_search.add_argument(
+        "--extract-keywords",
+        action="store_true",
+        help="Strip stopwords/pronouns from a natural-language query before FTS5.",
+    )
 
     # show
     p_show = sub.add_parser("show", help="Fetch a session's full transcript.")
@@ -164,6 +169,7 @@ def _cmd_search(args: argparse.Namespace, cfg: Config) -> int:
                 limit=args.limit,
                 project_slug=args.project,
                 threshold=args.threshold,
+                extract_keywords=args.extract_keywords,
             )
         except search.SearchError as exc:
             print(f"invalid query: {exc}", file=sys.stderr)

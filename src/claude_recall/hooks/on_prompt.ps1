@@ -15,7 +15,7 @@ try {
     $prompt = $parsed.prompt
     if (-not $prompt) { Write-Output '{}'; exit 0 }
 
-    $result = & claude-recall search $prompt --days 30 --limit 3 --threshold 0.3 --agent-context 2>$null
+    $result = & claude-recall search $prompt --days 30 --limit 3 --threshold 0.3 --extract-keywords --agent-context 2>$null
 
     if (-not $result -or $result -eq '{}') {
         Write-Output '{}'

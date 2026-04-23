@@ -18,6 +18,8 @@ import sqlite3
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 
+from . import keywords as _keywords
+
 _SNIPPET_START = "<mark>"
 _SNIPPET_END = "</mark>"
 _SNIPPET_TRUNC = "..."
@@ -60,13 +62,25 @@ def run_search(
     limit: int = 10,
     project_slug: str | None = None,
     threshold: float = 0.0,
+    extract_keywords: bool = False,
 ) -> SearchResponse:
     """Execute an FTS5 search and return ranked results.
 
     BM25 scores are returned from FTS5 as negative-ish numbers where smaller is
     more relevant. We negate so higher-is-better for the user-facing score, and
-    filter `score >= threshold`.
+    filter ``score >= threshold``.
+
+    When ``extract_keywords`` is True, natural-language tokens (stopwords,
+    pronouns, fillers) are stripped before the query reaches FTS5 and the
+    remaining keywords are OR-joined with BM25 ranking. This is the v0.2 hook
+    path. Direct CLI users leave it off to preserve exact-query semantics.
     """
+    if extract_keywords:
+        extracted = _keywords.extract_keywords(query)
+        fts_input = _keywords.build_fts_query(extracted) or query
+    else:
+        fts_input = query
+
     cutoff_iso = (datetime.now(UTC) - timedelta(days=days)).isoformat()
     snippet_expr = (
         f"snippet(messages_fts, 0, '{_SNIPPET_START}', '{_SNIPPET_END}', "
@@ -95,7 +109,7 @@ def run_search(
         tail_params.append(project_slug)
     sql += " ORDER BY bm25(messages_fts) ASC"
 
-    rows = _execute_with_fallback(conn, sql, query, tail_params)
+    rows = _execute_with_fallback(conn, sql, fts_input, tail_params)
 
     results: list[SearchResult] = []
     for row in rows:

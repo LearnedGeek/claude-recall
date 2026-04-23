@@ -76,6 +76,32 @@ def test_malformed_query_falls_back(indexed_db):
     assert resp.total_matches >= 1
 
 
+def test_extract_keywords_flag_strips_filler_tokens(indexed_db):
+    """extract_keywords=True strips stopwords before FTS5 sees the query.
+
+    With extraction, a natural-language prompt resolves to a clean OR of
+    topical tokens. The top BM25 result should be the message that most
+    directly matches the topical words.
+    """
+    resp = search.run_search(
+        indexed_db,
+        "remind me what we decided about regex patterns",
+        extract_keywords=True,
+    )
+    assert resp.total_matches >= 1
+    preview = resp.results[0].content_preview.lower()
+    assert "regex" in preview or "patterns" in preview
+
+
+def test_extract_keywords_off_preserves_raw_query(indexed_db):
+    """Direct CLI users with raw queries should see exact FTS5 semantics."""
+    # Raw "regex" is an exact FTS5 token; extraction is off by default.
+    raw = search.run_search(indexed_db, "regex")
+    assert raw.total_matches >= 1
+    # No keyword extraction mutation happened — the response echoes the input.
+    assert raw.query == "regex"
+
+
 def test_natural_language_query_zero_hit_fallback(indexed_db):
     """A natural-language prompt whose AND-join finds nothing falls back to OR-joined tokens.
 

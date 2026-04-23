@@ -240,7 +240,7 @@ v0.4 will add explicit `--global` vs. `--project-only` flags to the hook behavio
 |---|---|
 | "Too much irrelevant context is being injected" | Raise `hook_threshold` in config. Default `0.3` → try `0.5`. |
 | "Relevant context is being missed" | Lower `hook_threshold`. Or add an explicit `claude-recall search` invocation in your message when you need assurance. |
-| "The hook returns `{}` on most natural-language prompts" | Fixed in v0.1.1 — the search now re-issues the raw prompt as an OR-joined fallback on zero hits. If you're on v0.1.0, upgrade, or run `claude-recall search "<two or three keywords from the prompt>"` manually for now. Full keyword extraction lands in v0.2 ([issue #1](https://github.com/LearnedGeek/claude-recall/issues/1)). |
+| "The hook returns `{}` on most natural-language prompts" | Fixed in v0.2.0 via `--extract-keywords` in the shipped hook scripts. The hook strips stopwords/pronouns/fillers before FTS5 so topical tokens surface cleanly. v0.1.1 introduced an OR-join fallback as a stepping-stone; v0.2.0 is the proper fix. If you're still on v0.1.0 or v0.1.1, upgrade ([issue #1](https://github.com/LearnedGeek/claude-recall/issues/1)). |
 | "SessionStart hook is slow" | Confirm index is incremental by checking `claude-recall status`; run `claude-recall index --rebuild` once to normalize. |
 | "Hook fires but output never shows up in Claude" | Check `.claude/settings.json` was merged correctly. Run the hook manually — `bash .claude/hooks/claude-recall-on-prompt.sh` with a test JSON input — and confirm stdout is valid JSON. |
 | "FTS5 isn't available on my system" | Rare. `claude-recall status` reports `fts_available: false`. Upgrade Python or rebuild with FTS5 support. |

@@ -105,6 +105,35 @@ We use only `additionalContext` because:
 
 ---
 
+## 6a. Why stdlib keyword extraction in v0.2 (not spacy)
+
+PLAN §17 Decision 1 named spacy as the preferred keyword-extraction backend,
+with an explicit exception: *"unless a concrete reason emerges to prefer an
+alternative during v0.2 scoping."*
+
+**The concrete reason:** spacy's cold-import (~1–2 s per fresh Python process,
+with the small model loaded) conflicts with the 500 ms `UserPromptSubmit`
+budget from §7.3. Each hook invocation is a new process — there is no warm
+model cache to amortize against. The hook would either miss budget every time
+or be forced to skip extraction on slow-import runs.
+
+**v0.2 decision:** ship a stdlib stopword + token extractor. This is a large
+step up from v0.1.1's OR-join-every-token fallback: filler words
+(*remind, me, what, we, about*) no longer join the OR expression, so BM25
+ranks on topical signal. Still zero runtime dependencies. Still in budget.
+
+**What's preserved for a future opt-in:** a `[nlp]` extra with a warm-daemon
+spacy path is the natural v0.3 or v0.4 layer. Running spacy as a long-lived
+service alongside the hook, or as a separate indexing-time enrichment, would
+re-enable the POS-tagged quality path without paying cold-import cost per
+prompt. Out of v0.2 scope.
+
+**Quality-over-efficiency still holds.** The principle from §17 was about
+recall quality vs. install/runtime *footprint*. Per-prompt *latency* is a
+separate constraint the PLAN also commits to. Stdlib extraction honors both.
+
+---
+
 ## 7. Why PowerShell + bash hooks
 
 Claude Code runs on Windows, macOS, and Linux. A bash-only hook breaks Windows users.

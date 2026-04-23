@@ -2,7 +2,7 @@
 
 Automatic, cheap, precise query of your Claude Code session archive — wired into the prompt flow via hooks so you never have to remember to search.
 
-**Status:** v0.1.0 MVP shipped. Indexer, CLI, hooks, and tests all green. See [docs/PLAN.md](docs/PLAN.md) for the implementation plan.
+**Status:** v0.2.0 shipped. MVP + keyword-extraction hook path + zero-hit fallback. See [docs/PLAN.md](docs/PLAN.md) for the original plan and [CHANGELOG.md](CHANGELOG.md) for what's landed since.
 
 ---
 

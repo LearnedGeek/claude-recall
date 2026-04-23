@@ -98,6 +98,21 @@ def test_search_invalid_query_exits_2(cli_env):
     assert "invalid query" in err
 
 
+def test_search_extract_keywords_flag_end_to_end(cli_env):
+    """--extract-keywords strips fillers and matches for a natural-language prompt."""
+    cli_env["run"]("index")
+    code, out, _ = cli_env["run"](
+        "search",
+        "remind me what we decided about regex patterns",
+        "--extract-keywords",
+        "--format",
+        "json",
+    )
+    assert code == 0
+    payload = json.loads(out)
+    assert payload["total_matches"] >= 1
+
+
 def test_search_agent_context_empty_returns_braces(cli_env):
     """--agent-context with no matches prints literal '{}'."""
     cli_env["run"]("index")
