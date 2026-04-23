@@ -28,6 +28,24 @@ If you're using Claude Code on anything with history, give it a try. Open issues
 
 ---
 
+## Draft v3 (current, Apr 23 — ties to the blog post's Apr 20 / Apr 23 narrative)
+
+Three days ago I was debugging an issue with a Claude Code instance and landed on a principle I wrote down: *"cosine similarity measures topical overlap; parroting is verbatim phrase reuse; those are different signals."* We decided not to patch at the reply layer.
+
+Three days later, different Claude instance, same bug comes back. I ask for a fix. Claude proposes — almost word for word — the exact cosine-similarity guard I had rejected three days earlier. The reasoning existed on disk; the active instance just couldn't see it.
+
+I said "search the history before we move on anything." Built the tool that does that automatically.
+
+claude-recall: SQLite FTS5 + optional semantic rerank over the Claude Code session archive, wired as a UserPromptSubmit hook. Every prompt, the hook retrieves ranked prior-session context and injects it. ~80 ms per prompt on my machine. 25,000 messages indexed across 20 projects.
+
+Inspired directly by Microsoft's auto-memory post for Copilot CLI. Different agent, same insight: the archive is already on disk, the agent just isn't reading it.
+
+v0.4, MIT, beta. Repo: [link]. Blog post with the full story: [link].
+
+If you use Claude Code on anything with history, try it. File issues when it breaks.
+
+---
+
 ## Draft v2 (shorter, more punch)
 
 Claude Code writes every session to disk. Nothing queries those archives. So when I reference a decision from three days ago, Claude guesses — and guesses wrong.

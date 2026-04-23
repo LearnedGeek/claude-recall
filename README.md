@@ -2,7 +2,15 @@
 
 Automatic, cheap, precise query of your Claude Code session archive — wired into the prompt flow via hooks so you never have to remember to search.
 
-**Status:** v0.4.1 shipped. MVP + keyword extraction + auto project scoping + config-driven hook flags + stale-hook detection + opt-in semantic retrieval via Ollama + **NativeAOT C# hook binary for sub-100ms semantic-enabled hooks on Windows**. See [docs/PLAN.md](docs/PLAN.md) for the original plan, [docs/EMBEDDINGS-PLAN.md](docs/EMBEDDINGS-PLAN.md) / [docs/HOOK-BINARY-PLAN.md](docs/HOOK-BINARY-PLAN.md) for feature plans, and [CHANGELOG.md](CHANGELOG.md) for what's landed.
+> ### Status: beta
+>
+> **v0.4.1 is in daily production use on the maintainer's workflow against a 25,000-message session archive. The API and hook contract are stable. Known issues are tracked in GitHub (see [Known Issues](#known-issues)).**
+>
+> **v0.5 will publish to PyPI** so the install story becomes `pip install claude-recall` without a release-wheel URL. Until then, install from a tagged GitHub Release wheel (instructions below).
+>
+> Feedback welcome via GitHub issues. The tool handles single-user, single-machine session archives. Multi-user / shared-recall is explicitly out of scope for beta.
+
+**What landed at v0.4.1:** MVP + keyword extraction + auto project scoping + config-driven hook flags + stale-hook detection + opt-in semantic retrieval via Ollama + **NativeAOT C# hook binary for sub-100ms semantic-enabled hooks on Windows**. See [docs/PLAN.md](docs/PLAN.md) for the original plan, [docs/EMBEDDINGS-PLAN.md](docs/EMBEDDINGS-PLAN.md) / [docs/HOOK-BINARY-PLAN.md](docs/HOOK-BINARY-PLAN.md) for feature plans, and [CHANGELOG.md](CHANGELOG.md) for what's landed.
 
 ---
 
@@ -25,7 +33,7 @@ Not on PyPI yet — v0.5 target. Until then, install from a GitHub Release wheel
 **Windows x64** (gets the NativeAOT hook binary bundled for ~80ms semantic hooks):
 
 ```bash
-pip install --upgrade "claude_recall[embeddings] @ https://github.com/LearnedGeek/claude-recall/releases/download/v0.4.1/claude_recall-0.4.0-py3-none-win_amd64.whl"
+pip install --upgrade "claude_recall[embeddings] @ https://github.com/LearnedGeek/claude-recall/releases/download/v0.4.1/claude_recall-0.4.1-py3-none-win_amd64.whl"
 claude-recall init-hooks
 claude-recall index
 ```
@@ -33,7 +41,7 @@ claude-recall index
 **macOS / Linux** (pure-Python wheel — shell-hook fallback path, no compiled binary yet):
 
 ```bash
-pip install --upgrade "claude_recall[embeddings] @ https://github.com/LearnedGeek/claude-recall/releases/download/v0.4.1/claude_recall-0.4.0-py3-none-any.whl"
+pip install --upgrade "claude_recall[embeddings] @ https://github.com/LearnedGeek/claude-recall/releases/download/v0.4.1/claude_recall-0.4.1-py3-none-any.whl"
 claude-recall init-hooks
 claude-recall index
 ```
@@ -94,13 +102,28 @@ Claude Code has excellent primitives — the `.jsonl` session archive, hooks wit
 
 ---
 
+## Known Issues
+
+Live list of issues caught in beta use. Filing new issues is explicitly welcome — the beta is the feedback channel.
+
+- **Open issues:** see [github.com/LearnedGeek/claude-recall/issues](https://github.com/LearnedGeek/claude-recall/issues) for the current list.
+- **Recently closed (not a full changelog — see [CHANGELOG.md](CHANGELOG.md) for that):**
+  - [#3](https://github.com/LearnedGeek/claude-recall/issues/3) — `init-hooks --force` crashed on Windows native-binary wheels. Fixed in v0.4.1.
+  - [#2](https://github.com/LearnedGeek/claude-recall/issues/2) — Hook didn't auto-scope to current project + hardcoded `--days 30` ignored config. Fixed in v0.2.1.
+  - [#1](https://github.com/LearnedGeek/claude-recall/issues/1) — UserPromptSubmit hook returned empty on natural-language prompts. Fixed via stdlib keyword extraction in v0.2.0.
+
+**Beta expectations:** I find issues by using the tool. You may find different issues by using it differently. That's the point of a beta. File and describe — I'll triage quickly.
+
+---
+
 ## Documentation
 
 - [**docs/PLAN.md**](docs/PLAN.md) — full implementation plan, specifications, acceptance criteria. Self-contained so any competent agent or engineer can pick it up and execute.
 - [**docs/ARCHITECTURE.md**](docs/ARCHITECTURE.md) — deeper architectural design, rationale, alternatives considered.
 - [**docs/INTEGRATION-GUIDE.md**](docs/INTEGRATION-GUIDE.md) — how to wire `claude-recall` into any Claude Code project, with a worked example on the ANI Runtime project.
-- [**docs/BLOG-POST.md**](docs/BLOG-POST.md) — draft outline for the launch blog post.
-- [**docs/LINKEDIN-POST.md**](docs/LINKEDIN-POST.md) — draft outline for the LinkedIn announcement.
+- [**docs/BLOG-POST.md**](docs/BLOG-POST.md) — outline for the launch blog post (kept as design artifact).
+- [**docs/BLOG-POST-DRAFT.md**](docs/BLOG-POST-DRAFT.md) — full draft of the launch post in the maintainer's voice (pending author rewrite pass).
+- [**docs/LINKEDIN-POST.md**](docs/LINKEDIN-POST.md) — LinkedIn announcement drafts (short-form).
 
 ---
 
