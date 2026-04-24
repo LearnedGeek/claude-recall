@@ -2,6 +2,75 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.5.0 — 2026-04-24
+
+**Distribution milestone: first PyPI publish.** `pip install claude-recall` now
+works globally. No user-visible behavior changes vs v0.4.3; this release
+exists to shift distribution off `git+https://...` wheel URLs and onto the
+standard Python package index.
+
+### Added
+
+- **PyPI publish via CI.** `.github/workflows/build-wheels.yml` gains a
+  `publish-pypi` job that uploads both the `win_amd64` (binary-bundled)
+  and `py3-none-any` (pure-Python fallback) wheels to PyPI on tag push,
+  using the official `pypa/gh-action-pypi-publish` action. Gated on the
+  `PYPI_API_TOKEN` secret so forks / pre-setup branches don't turn CI red.
+- `pyproject.toml` polish: Development Status bumped `Alpha → Beta`,
+  classifier list expanded (OS coverage, topic tags, Typed trailer),
+  keyword list extended for PyPI search discoverability, `Project-URL`
+  entries for Repository / Documentation / Changelog / Releases.
+- `docs/POST-STRATEGY.md` — distribution plan matched to the owner's
+  explicit constraints (no HN, no video, minimal social). Ordered channel
+  list with leverage rationale.
+- `docs/v0.5-PYPI-SETUP.md` — one-time PyPI account setup checklist for
+  the project owner.
+
+### Install
+
+```bash
+pip install 'claude-recall[embeddings]'
+claude-recall init-hooks
+claude-recall index
+```
+
+Windows x64 automatically gets the NativeAOT hook binary via the platform
+wheel; other platforms get the pure-Python shell-hook fallback per v0.4's
+distribution design. Both wheels ship with every tag-triggered CI run.
+
+### Not changed
+
+- No C# hook binary changes. 62 xUnit tests green unchanged.
+- No semantic-retrieval or hook-correctness logic changes. All 8
+  dogfooding issues remain closed.
+- Tests: 152 Python + 62 C# = 214 passing. Same surface as v0.4.3.
+
+### Upgrading from any v0.4.x
+
+```bash
+pip install --upgrade 'claude-recall[embeddings]'
+claude-recall init-hooks --force
+```
+
+That's it. No re-embed needed; the vector store and index file are
+untouched. The `--force` is only necessary if you want `init-hooks` to
+clean up any duplicate `UserPromptSubmit` entries left over from the
+v0.4.0 → v0.4.1 upgrade path (fixed in v0.4.2); otherwise you can omit it.
+
+### What's next
+
+Per [docs/POST-STRATEGY.md](docs/POST-STRATEGY.md):
+- Blog post on learnedgeek.com + dev.to cross-post
+- GitHub Discussion in `anthropics/claude-code`
+- Awesome-list PRs (awesome-claude-code, awesome-rag, awesome-ollama)
+- Newsletter pitches (Python Weekly, Simon Willison)
+- LinkedIn post
+- r/ClaudeAI post
+
+Pre-1.0 cadence continues — v0.5.x for patches, v0.6.0 for the next
+substantial feature (cross-project `--all-projects` search is the
+PLAN §13 v0.4 item that's been deferred since the hook-binary work).
+
 ## v0.4.3 — 2026-04-24
 
 First-run embeddings-setup UX cluster. Four issues ([#5](https://github.com/LearnedGeek/claude-recall/issues/5), [#6](https://github.com/LearnedGeek/claude-recall/issues/6), [#7](https://github.com/LearnedGeek/claude-recall/issues/7), [#8](https://github.com/LearnedGeek/claude-recall/issues/8))
