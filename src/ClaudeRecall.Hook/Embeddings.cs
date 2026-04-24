@@ -34,11 +34,17 @@ internal class OllamaClient : IDisposable
     private readonly HttpClient _http;
     private readonly string _baseUrl;
     private readonly string _model;
+    private readonly string? _keepAlive;
 
-    public OllamaClient(string baseUrl, string model, double timeoutSeconds)
+    public OllamaClient(
+        string baseUrl,
+        string model,
+        double timeoutSeconds,
+        string? keepAlive = null)
     {
         _baseUrl = baseUrl.TrimEnd('/');
         _model = model;
+        _keepAlive = keepAlive;  // issue #11 — sent on every embed call
         _http = new HttpClient
         {
             Timeout = TimeSpan.FromSeconds(timeoutSeconds),
@@ -68,7 +74,7 @@ internal class OllamaClient : IDisposable
             using var req = new HttpRequestMessage(HttpMethod.Post, $"{_baseUrl}/api/embed")
             {
                 Content = JsonContent.Create(
-                    new EmbedRequest(_model, texts.ToArray()),
+                    new EmbedRequest(_model, texts.ToArray(), _keepAlive),
                     EmbeddingsJsonContext.Default.EmbedRequest),
             };
             using var resp = _http.Send(req, HttpCompletionOption.ResponseContentRead);
@@ -299,11 +305,16 @@ internal sealed class EmbedRequest
 {
     [JsonPropertyName("model")] public string Model { get; init; }
     [JsonPropertyName("input")] public string[] Input { get; init; }
+    // Issue #11: null values get omitted by System.Text.Json defaults
+    // (DefaultIgnoreCondition = WhenWritingNull on the context below), so
+    // keep_alive is only sent when the client was configured with one.
+    [JsonPropertyName("keep_alive")] public string? KeepAlive { get; init; }
 
-    public EmbedRequest(string model, string[] input)
+    public EmbedRequest(string model, string[] input, string? keepAlive = null)
     {
         Model = model;
         Input = input;
+        KeepAlive = keepAlive;
     }
 }
 
@@ -327,6 +338,11 @@ internal sealed class TagModel
     [JsonPropertyName("name")] public string? Name { get; set; }
 }
 
+[JsonSourceGenerationOptions(
+    // Drop keep_alive from the serialized JSON when null, so the existing
+    // contract (no keep_alive field = Ollama default 5m) is preserved for
+    // clients that don't set one. Issue #11.
+    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(EmbedRequest))]
 [JsonSerializable(typeof(EmbedResponse))]
 [JsonSerializable(typeof(VersionResponse))]

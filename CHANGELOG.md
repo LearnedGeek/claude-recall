@@ -2,6 +2,87 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.5.2 — 2026-04-24
+
+Fixes the four issues filed against v0.5.1's PyPI landing-page and hook
+behavior ([#9](https://github.com/LearnedGeek/claude-recall/issues/9), [#10](https://github.com/LearnedGeek/claude-recall/issues/10), [#11](https://github.com/LearnedGeek/claude-recall/issues/11), [#12](https://github.com/LearnedGeek/claude-recall/issues/12)) plus one UX paper-cut (init-hooks
+nudges on upgrade).
+
+### Fixed
+
+- **#9 — PyPI README was telling users to go hunt wheel URLs.** The `README.md`
+  still carried v0.4.2 pre-PyPI framing (*"v0.5 will publish to PyPI ...
+  Until then, install from a tagged GitHub Release wheel"*). Rewritten
+  for v0.5.x: `pip install 'claude-recall[embeddings]'` is the landing
+  install command, status block reflects beta-currently-shipping state,
+  "Known Issues" section rolled forward through #8.
+- **#10 — relative markdown links 404'd on PyPI.** Every `[label](docs/...)`
+  or `[label](CHANGELOG.md)` link in the README now points at absolute
+  `https://github.com/LearnedGeek/claude-recall/blob/main/...` URLs.
+  Renders correctly on both PyPI and GitHub.
+- **#11 — hook latency claim was calibrated for small archives.** Added
+  `[embeddings].keep_alive` config (default `"30m"`) — sent on every
+  Ollama embed call so the model stays resident across a coding session
+  instead of unloading every 5 minutes (Ollama default). Eliminates the
+  ~4s cold-load on the first prompt after any idle gap.
+  Also added a `--timing` flag to the hook binary for per-stage latency
+  self-diagnosis (stderr-only; never pollutes hook stdout).
+  README hook-latency section rewritten with honest scaling numbers
+  (~80ms on small archives, ~2s on 25k-message archives with semantic
+  on). The docs now match dogfooding observation.
+- **#12 — C# hook binary `--version` reported stale `0.4.0`.** Version
+  now flows from `pyproject.toml` into the `dotnet publish /p:Version=X.Y.Z`
+  property at build time, and `Program.Version` reads it from
+  `AssemblyInformationalVersionAttribute` instead of a hardcoded
+  constant. No more manual bumping of two files; no more drift.
+  Build verified: `claude-recall-hook.exe --version` now reports `0.5.2`.
+- **Bonus — `init-hooks` stopped nagging upgraders with first-install
+  instructions.** The "run `claude-recall index`" and "to enable
+  semantic rerank, edit config.toml" nudges now print conditionally:
+  only when the index is empty / embeddings are off. Upgrade runs of
+  `init-hooks --force` on a working install stay quiet.
+
+### Added
+
+- `[embeddings].keep_alive` config key (default `"30m"`). Set to `"0"`
+  to unload after every call, `"-1"` to keep loaded indefinitely, or
+  any Ollama-accepted duration string.
+- `claude-recall-hook.exe --timing`: prints per-stage latency breakdown
+  to stderr (`startup+config`, `stdin`, `keywords`, `db-open`,
+  `slug-resolve`, `fts5`, `rerank`, `json-out`). Use for self-diagnosis
+  when hook latency feels off.
+- `build-hook.ps1` and `.github/workflows/build-wheels.yml` both now
+  read the package version from `pyproject.toml` and pass it as the
+  `dotnet publish /p:Version=...` property.
+
+### Changed
+
+- README completely reframed for the PyPI-shipping state. Landing page
+  now leads with `pip install 'claude-recall[embeddings]'` and absolute
+  links to docs.
+- Default `[embeddings].keep_alive = "30m"` — was previously omitted
+  (relying on Ollama's 5m default), which caused measurable cold-model
+  re-loads for users with more than a few minutes between prompts.
+
+### Tests
+
+152 Python + 62 C# = 214 passing, unchanged. `Version_IsSemVer`
+loosened to `Version_IsNotEmpty` so the local `dotnet test` path
+(which hits the `0.0.0-dev` fallback when `/p:Version=` isn't passed)
+still exercises the new reflection-based version lookup.
+
+### Upgrading
+
+```bash
+pip install --upgrade 'claude-recall[embeddings]'
+claude-recall init-hooks --force
+```
+
+The `--force` refreshes the hook binary in your project's
+`.claude/hooks/` so `claude-recall-hook.exe --version` now correctly
+reports 0.5.2 instead of the stale 0.4.0. No data changes; no re-embed
+needed.
+
 ## v0.5.1 — 2026-04-24
 
 CI-only patch. v0.5.0's tag push failed workflow parsing because GitHub

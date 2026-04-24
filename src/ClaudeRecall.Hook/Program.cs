@@ -14,7 +14,26 @@ namespace ClaudeRecall.Hook;
 
 internal static class Program
 {
-    public const string Version = "0.4.0";
+    // Issue #12: read from assembly metadata so the build pipeline's
+    // `/p:Version=X.Y.Z` flows through to --version output automatically.
+    // No more hand-bumping a constant that drifts from the csproj.
+    public static readonly string Version = GetAssemblyVersion();
+
+    private static string GetAssemblyVersion()
+    {
+        var asm = typeof(Program).Assembly;
+        // AssemblyInformationalVersion respects the <Version> csproj property
+        // as-is (e.g. "0.5.2" not "0.5.2.0"), so prefer it over AssemblyVersion.
+        var info = asm.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false);
+        if (info.Length > 0)
+        {
+            var v = ((System.Reflection.AssemblyInformationalVersionAttribute)info[0]).InformationalVersion;
+            // Strip any git-hash suffix setuptools-scm-style tools append.
+            var plus = v.IndexOf('+');
+            return plus >= 0 ? v[..plus] : v;
+        }
+        return asm.GetName().Version?.ToString(3) ?? "unknown";
+    }
 
     public static int Main(string[] args)
     {
@@ -45,6 +64,15 @@ internal static class Program
         }
 
         var cfg = Config.Load(parsed.ConfigPath);
+        // Issue #11: per-stage timing breakdown to stderr when --timing is
+        // set. Users can diagnose which phase (startup, DB, Ollama embed,
+        // rerank, JSON) is spending the time instead of guessing.
+        var timings = parsed.Timing ? new List<(string, long)>() : null;
+        void Stamp(string stage)
+        {
+            timings?.Add((stage, stopwatch.ElapsedMilliseconds));
+        }
+        Stamp("startup+config");
 
         if (parsed.Probe)
         {
@@ -54,6 +82,7 @@ internal static class Program
 
         // ---- Read stdin ---------------------------------------------------
         var prompt = ReadPromptFromStdin();
+        Stamp("stdin");
         if (string.IsNullOrWhiteSpace(prompt))
         {
             Console.WriteLine("{}");
@@ -68,6 +97,7 @@ internal static class Program
             // Nothing survived extraction; fall back to raw prompt.
             ftsQuery = prompt;
         }
+        Stamp("keywords");
 
         // ---- Open DB read-only -------------------------------------------
         if (!File.Exists(cfg.DbPath))
@@ -78,9 +108,11 @@ internal static class Program
         }
 
         using var conn = Storage.OpenReadOnly(cfg.DbPath);
+        Stamp("db-open");
 
         // ---- Project scope (cwd → slug) ----------------------------------
         var projectSlug = Projects.ResolveProjectSlug(conn, Environment.CurrentDirectory);
+        Stamp("slug-resolve");
 
         // ---- FTS5 pool ---------------------------------------------------
         var poolSize = Math.Max(cfg.HookLimit, cfg.RerankPoolSize);
@@ -91,6 +123,7 @@ internal static class Program
             projectSlug: projectSlug,
             days: cfg.HookDays,
             poolSize: poolSize);
+        Stamp("fts5");
 
         // Apply threshold.
         var gated = pool.Where(r => r.Score >= cfg.HookThreshold).ToList();
@@ -102,7 +135,8 @@ internal static class Program
             var timeoutSec = parsed.TimeoutMs.HasValue
                 ? parsed.TimeoutMs.Value / 1000.0
                 : cfg.RequestTimeoutSeconds;
-            using var client = new OllamaClient(cfg.OllamaBaseUrl, cfg.EmbeddingsModel, timeoutSec);
+            using var client = new OllamaClient(
+                cfg.OllamaBaseUrl, cfg.EmbeddingsModel, timeoutSec, cfg.KeepAlive);
             var (rerankedList, reason) = Rerank.Run(conn, client, ftsQuery, gated);
             ranked = rerankedList;
             if (parsed.Verbose && reason is not null)
@@ -120,10 +154,24 @@ internal static class Program
             }
             ranked = asReranked;
         }
+        Stamp("rerank");
 
         // ---- Emit agent-context JSON --------------------------------------
         var top = ranked.Take(cfg.HookLimit).ToList();
         WriteAgentContext(top);
+        Stamp("json-out");
+
+        if (timings is not null)
+        {
+            long prev = 0;
+            Console.Error.WriteLine("claude-recall-hook timing (ms cumulative / delta):");
+            foreach (var (stage, ms) in timings)
+            {
+                var delta = ms - prev;
+                Console.Error.WriteLine($"  {stage,-18} {ms,6} ms  (+{delta} ms)");
+                prev = ms;
+            }
+        }
 
         if (parsed.Verbose)
         {
@@ -198,8 +246,10 @@ internal static class Program
             Console.WriteLine("{\"embeddings_enabled\": false}");
             return;
         }
-        using var client = new OllamaClient(cfg.OllamaBaseUrl, cfg.EmbeddingsModel,
-            Math.Min(cfg.RequestTimeoutSeconds, 5.0));
+        using var client = new OllamaClient(
+            cfg.OllamaBaseUrl, cfg.EmbeddingsModel,
+            Math.Min(cfg.RequestTimeoutSeconds, 5.0),
+            cfg.KeepAlive);
         var probe = client.Probe();
         var json = JsonSerializer.Serialize(probe, ProgramJsonContext.Default.ProbeResult);
         Console.WriteLine(json);
@@ -213,6 +263,10 @@ internal sealed class CliArgs
     public bool Probe { get; private set; }
     public bool NoSemantic { get; private set; }
     public bool Verbose { get; private set; }
+    // Issue #11: emit per-stage timing to stderr for latency self-diagnosis.
+    // Implies verbose behavior; separate flag because `--verbose` prints
+    // diagnostic info beyond timing that users may not want in a hook log.
+    public bool Timing { get; private set; }
     public int? TimeoutMs { get; private set; }
 
     public static CliArgs Parse(string[] args)
@@ -227,6 +281,7 @@ internal sealed class CliArgs
                 case "--probe": result.Probe = true; break;
                 case "--no-semantic": result.NoSemantic = true; break;
                 case "--verbose": result.Verbose = true; break;
+                case "--timing": result.Timing = true; break;
                 case "--config":
                     if (i + 1 < args.Length) result.ConfigPath = args[++i];
                     break;

@@ -243,6 +243,7 @@ def _cmd_search(args: argparse.Namespace, cfg: Config) -> int:
                         cfg.embeddings.ollama_base_url,
                         cfg.embeddings.model,
                         cfg.embeddings.request_timeout_seconds,
+                        keep_alive=cfg.embeddings.keep_alive,
                     )
                 except ImportError as exc:
                     print(
@@ -602,13 +603,15 @@ def _cmd_status(args: argparse.Namespace, cfg: Config) -> int:
 # patching module-level imports. Production path always returns a real
 # OllamaClient; tests override _ollama_client_factory in the module namespace.
 def _ollama_client_factory(base_url: str, model: str, timeout: float,
-                            max_input_chars: int | None = None):
+                            max_input_chars: int | None = None,
+                            keep_alive: str | None = None):
     from . import embeddings as _embeddings
     return _embeddings.OllamaClient(
         base_url=base_url,
         model=model,
         timeout=timeout,
         max_input_chars=max_input_chars,
+        keep_alive=keep_alive,
     )
 
 
@@ -664,6 +667,9 @@ def _cmd_embed(args: argparse.Namespace, cfg: Config) -> int:
         # Issue #8: truncate oversized inputs before Ollama sees them so a
         # single long message can't fail its whole batch.
         max_input_chars=cfg.embeddings.max_input_chars,
+        # Issue #11: pass keep_alive so the model stays warm across a
+        # typical coding session instead of unloading every 5 minutes.
+        keep_alive=cfg.embeddings.keep_alive,
     )
 
     if args.probe:
@@ -1032,13 +1038,44 @@ def _cmd_init_hooks(args: argparse.Namespace, cfg: Config) -> int:
     print(f"claude-recall: settings {verb} into {settings_path}")
     if config_created is not None:
         print(f"claude-recall: config template written to {config_created}")
-    print("claude-recall: run `claude-recall index` once to build the index.")
-    print(
-        "claude-recall: to enable semantic rerank, edit the [embeddings] "
-        "section of your config.toml (see INTEGRATION-GUIDE §9 "
-        "\"How do I turn on embeddings?\")."
-    )
+
+    # Suppress first-install nudges when the index + embeddings state shows
+    # this is clearly an upgrade of a fully-working setup (OC's bonus note).
+    has_index = _db_has_any_sessions(cfg.db_path)
+    if not has_index:
+        print("claude-recall: run `claude-recall index` once to build the index.")
+    if not cfg.embeddings.enabled:
+        print(
+            "claude-recall: to enable semantic rerank, edit the [embeddings] "
+            "section of your config.toml (see INTEGRATION-GUIDE §9 "
+            "\"How do I turn on embeddings?\")."
+        )
     return 0
+
+
+def _db_has_any_sessions(db_path: Path) -> bool:
+    """Quick check: does the configured DB already have indexed data?
+
+    Used to silence first-install nudges during upgrade runs of init-hooks.
+    Fails closed (returns False) on any error so the nudges still fire if
+    we can't tell.
+    """
+    if not db_path.exists():
+        return False
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sessions'"
+            ).fetchone()
+            if not row or row[0] == 0:
+                return False
+            row = conn.execute("SELECT COUNT(*) FROM sessions LIMIT 1").fetchone()
+            return bool(row and row[0] > 0)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return False
 
 
 def _scaffold_config_template() -> Path | None:

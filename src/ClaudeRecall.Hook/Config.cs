@@ -32,6 +32,10 @@ internal sealed class Config
     public int RerankPoolSize { get; init; } = 50;
     public double RequestTimeoutSeconds { get; init; } = 10.0;
     public int BatchSize { get; init; } = 32;
+    // Issue #11: keep_alive sent on every embed call so the Ollama model
+    // stays loaded across a coding session (Ollama default is 5m, which
+    // unloads between typical prompts). See Python side for full rationale.
+    public string KeepAlive { get; init; } = "30m";
     // v0.4 default true — see src/claude_recall/config.py for rationale.
     public bool UseInHook { get; init; } = true;
 
@@ -74,6 +78,7 @@ internal sealed class Config
             RerankPoolSize = GetInt(root, "embeddings", "rerank_pool_size", def.RerankPoolSize),
             RequestTimeoutSeconds = GetDouble(root, "embeddings", "request_timeout_seconds", def.RequestTimeoutSeconds),
             BatchSize = GetInt(root, "embeddings", "batch_size", def.BatchSize),
+            KeepAlive = GetString(root, "embeddings", "keep_alive", def.KeepAlive),
             UseInHook = GetBool(root, "embeddings", "use_in_hook", def.UseInHook),
         };
     }

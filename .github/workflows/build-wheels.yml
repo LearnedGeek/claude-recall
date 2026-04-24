@@ -34,16 +34,31 @@ jobs:
       - name: Install build dependencies
         run: python -m pip install --upgrade pip build
 
+      - name: Read package version from pyproject.toml
+        id: pkgver
+        # Pulled out so the same version flows into both `dotnet publish
+        # /p:Version=...` (so the binary's --version matches the Python
+        # package — issue #12) and any future version-dependent steps.
+        run: |
+          $line = Select-String -Path pyproject.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+          if (-not $line) { throw "version not found in pyproject.toml" }
+          $v = $line.Matches[0].Groups[1].Value
+          Write-Host "Package version: $v"
+          "version=$v" >> $env:GITHUB_OUTPUT
+
       - name: Publish NativeAOT hook binary
         # windows-latest has MSVC Build Tools + C++ workload pre-installed;
         # no env-var workaround needed. We run dotnet publish directly rather
         # than build-hook.ps1 to avoid the BuildTools-auto-detect dance.
         run: |
-          dotnet publish src/ClaudeRecall.Hook -c Release -r win-x64 --self-contained -nologo
+          dotnet publish src/ClaudeRecall.Hook `
+            -c Release -r win-x64 --self-contained -nologo `
+            /p:Version=${{ steps.pkgver.outputs.version }}
           New-Item -ItemType Directory -Path src/claude_recall/native -Force | Out-Null
           Copy-Item src/ClaudeRecall.Hook/bin/Release/net9.0/win-x64/publish/claude-recall-hook.exe -Destination src/claude_recall/native/ -Force
           Copy-Item src/ClaudeRecall.Hook/bin/Release/net9.0/win-x64/publish/e_sqlite3.dll -Destination src/claude_recall/native/ -Force
           Get-ChildItem src/claude_recall/native | Format-Table Name, Length
+          & src/claude_recall/native/claude-recall-hook.exe --version
 
       - name: Build wheel (tag as win_amd64)
         # setuptools produces `py3-none-any` by default for packages with no

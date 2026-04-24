@@ -60,11 +60,17 @@ class OllamaClient:
         model: str = DEFAULT_MODEL,
         timeout: float = DEFAULT_TIMEOUT,
         max_input_chars: int | None = None,
+        keep_alive: str | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
         self.max_input_chars = max_input_chars
+        # Issue #11: Ollama's default keep_alive=5m means the model unloads
+        # between infrequent hook invocations, and the next prompt pays a
+        # ~4s cold-load. Pass a longer keep_alive on every embed call so
+        # the model stays resident across a typical coding session.
+        self.keep_alive = keep_alive
         self._client = httpx.Client(timeout=timeout)
 
     def close(self) -> None:
@@ -103,10 +109,14 @@ class OllamaClient:
                 for t in texts
             ]
 
+        payload: dict = {"model": self.model, "input": texts}
+        if self.keep_alive:
+            payload["keep_alive"] = self.keep_alive
+
         try:
             resp = self._client.post(
                 f"{self.base_url}/api/embed",
-                json={"model": self.model, "input": texts},
+                json=payload,
             )
             # Issue #8: surface Ollama's response body in the exception. The
             # raw httpx message ("Client error '400 Bad Request' for url ...")

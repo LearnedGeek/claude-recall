@@ -41,6 +41,13 @@ class EmbeddingsConfig:
     # conservative default (~1500 tokens) with headroom for the model's
     # internal overhead.
     max_input_chars: int = 6000
+    # Ollama keep_alive directive sent on every embed call. Default 30m
+    # keeps the embed model warm across a coding session, eliminating the
+    # ~4s cold-load cost each time nomic-embed-text would otherwise unload
+    # (Ollama default keep_alive=5m, which is much shorter than typical
+    # between-prompt gaps). Set to "0" to unload after every call, or "-1"
+    # to keep loaded indefinitely. Issue #11.
+    keep_alive: str = "30m"
     # Hook uses --semantic when true AND enabled is true.
     # v0.4: default flipped to true — the C# NativeAOT hook binary brings
     # semantic-on hook latency to ~30-80ms (well under PLAN §7.3's 500ms
@@ -118,6 +125,7 @@ def _load_toml(path: Path) -> Config:
         "request_timeout_seconds",
         "batch_size",
         "max_input_chars",
+        "keep_alive",
         "use_in_hook",
     ):
         val = _dig(data, "embeddings", field_name)

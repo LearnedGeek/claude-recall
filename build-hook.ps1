@@ -92,12 +92,24 @@ if (-not (Test-Path $ProjectDir)) {
     throw "Project directory not found: $ProjectDir"
 }
 
+# Read the package version from pyproject.toml so the C# binary's --version
+# flag and assembly metadata match the Python package version (issue #12).
+$pyproject = Join-Path $RepoRoot 'pyproject.toml'
+$versionLine = Select-String -Path $pyproject -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+if (-not $versionLine) {
+    throw "Could not locate `"version = `"X.Y.Z`"`" in $pyproject"
+}
+$packageVersion = $versionLine.Matches[0].Groups[1].Value
+Write-Host "Package version from pyproject.toml: $packageVersion"
+
 Write-Host ''
 Write-Host "Publishing $Configuration/$Runtime ..." -ForegroundColor Cyan
 # IlcUseEnvironmentalTools=true tells NativeAOT to use whatever link.exe is on
 # PATH instead of running findvcvarsall.bat (which can't locate BuildTools
 # installations that aren't registered with vswhere).
-dotnet publish $ProjectDir -c $Configuration -r $Runtime --self-contained -nologo /p:IlcUseEnvironmentalTools=true
+dotnet publish $ProjectDir -c $Configuration -r $Runtime --self-contained -nologo `
+    /p:IlcUseEnvironmentalTools=true `
+    /p:Version=$packageVersion
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $publishDir = Join-Path $ProjectDir "bin/$Configuration/net9.0/$Runtime/publish"

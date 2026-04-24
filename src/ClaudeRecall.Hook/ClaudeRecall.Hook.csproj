@@ -7,7 +7,11 @@
     <Nullable>enable</Nullable>
     <RootNamespace>ClaudeRecall.Hook</RootNamespace>
     <AssemblyName>claude-recall-hook</AssemblyName>
-    <Version>0.4.0</Version>
+    <!-- Version is passed in from CI (`dotnet publish /p:Version=X.Y.Z`) or
+         via build-hook.ps1 so it stays in lockstep with pyproject.toml.
+         The fallback only fires for someone running `dotnet publish` without
+         the property — the resulting binary should not ship. Issue #12. -->
+    <Version Condition=" '$(Version)' == '' ">0.0.0-dev</Version>
 
     <!-- NativeAOT: tiny single-file binary, no .NET runtime install needed. -->
     <PublishAot>true</PublishAot>

@@ -52,8 +52,12 @@ public class SmokeTests
     }
 
     [Fact]
-    public void Version_IsSemVer()
+    public void Version_IsNotEmpty()
     {
-        Assert.Matches(@"^\d+\.\d+\.\d+$", Program.Version);
+        // Version now flows from the csproj <Version> property via assembly
+        // metadata. CI passes /p:Version=<pyproject version>; local dotnet
+        // test without that flag gets the "0.0.0-dev" fallback. Both are
+        // valid — the test only guards against empty / null (issue #12).
+        Assert.False(string.IsNullOrWhiteSpace(Program.Version));
     }
 }
