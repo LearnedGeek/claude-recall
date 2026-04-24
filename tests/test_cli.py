@@ -339,6 +339,264 @@ def test_init_hooks_uses_native_binary_when_present(tmp_path, monkeypatch):
     assert any("claude-recall-hook.exe" in c for c in ups_cmds)
 
 
+def test_status_probes_ollama_even_when_embeddings_disabled(tmp_path, monkeypatch, capsys):
+    """Issue #5: `ollama_reachable` in json/text status reflects actual
+    reachability, not the `[embeddings].enabled` config toggle."""
+    archive_root = _seed_archive(tmp_path)
+    db_path = tmp_path / "index.db"
+    cfg = tmp_path / "config.toml"
+    # enabled is absent; defaults to false
+    cfg.write_text(
+        f'[archive]\nroot = "{archive_root.as_posix()}"\n'
+        f'[database]\npath = "{db_path.as_posix()}"\n',
+        encoding="utf-8",
+    )
+    # Ollama IS up (fake responds healthily) even though embeddings are off.
+    _use_fake_ollama(monkeypatch, _FakeOllama())
+
+    cli.main(["--config", str(cfg), "index"])
+    capsys.readouterr()
+    cli.main(["--config", str(cfg), "status", "--format", "json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["embeddings_enabled"] is False
+    assert payload["ollama_reachable"] is True  # honest, not conflated
+
+
+def test_status_agent_context_skips_probe_when_disabled(tmp_path, capsys):
+    """Hook path stays fast — no unconditional Ollama probe in agent-context
+    format when embeddings are disabled. Budget protection."""
+    archive_root = _seed_archive(tmp_path)
+    db_path = tmp_path / "index.db"
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        f'[archive]\nroot = "{archive_root.as_posix()}"\n'
+        f'[database]\npath = "{db_path.as_posix()}"\n',
+        encoding="utf-8",
+    )
+    cli.main(["--config", str(cfg), "index"])
+    capsys.readouterr()
+    # Don't set up fake Ollama — if the code probes, it'll slow down.
+    # Just confirm the command returns cleanly and no Embeddings: line
+    # mentioning Ollama is printed.
+    cli.main(["--config", str(cfg), "status", "--format", "agent-context"])
+    out = capsys.readouterr().out
+    assert "Embeddings:" not in out
+
+
+def test_embed_probe_uses_longer_timeout_and_clarifies_cold_start(
+    tmp_path, monkeypatch, capsys,
+):
+    """Issue #7: --probe gets extended timeout (for model cold-start) and a
+    clearer error message when the failure looks like a cold-start timeout
+    (reachable + model present + 'time' in error)."""
+    archive_root = _seed_archive(tmp_path)
+    db_path = tmp_path / "index.db"
+    cfg = _enable_embeddings_cfg(tmp_path, archive_root, db_path)
+
+    class _ColdStartClient:
+        def __init__(self):
+            self.timeout = None  # will be set by the factory wrapper
+        def probe(self):
+            from claude_recall.embeddings import ProbeResult
+            return ProbeResult(
+                ollama_reachable=True, version="0.18.2",
+                model_present=True, embed_ok=False, dim=None,
+                error="Ollama request failed: timed out",
+            )
+        def close(self):
+            pass
+
+    captured_timeout = {"value": None}
+
+    def _factory(base_url, model, timeout, **kw):
+        captured_timeout["value"] = timeout
+        return _ColdStartClient()
+
+    from claude_recall import cli as _cli
+    monkeypatch.setattr(_cli, "_ollama_client_factory", _factory)
+
+    code = cli.main(["--config", str(cfg), "embed", "--probe"])
+    assert code == 2  # embed_ok = False → exit 2
+
+    # Probe should have been given at least 30s, regardless of config.
+    assert captured_timeout["value"] is not None
+    assert captured_timeout["value"] >= 30.0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["embed_ok"] is False
+    # Error is rewritten with a cold-start hint, not just "timed out".
+    assert "cold" in payload["error"].lower() or "first-call" in payload["error"].lower() \
+        or "model load" in payload["error"].lower()
+
+
+def test_init_hooks_scaffolds_config_template_when_missing(tmp_path, monkeypatch):
+    """Issue #6: init-hooks writes a commented config.toml template on
+    first-time setup so users discover the [embeddings] section without
+    reading three docs."""
+    cfg_home = tmp_path / "cfg_home"
+    monkeypatch.setenv("APPDATA", str(cfg_home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg_home))
+
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+
+    code = cli.main(["init-hooks", "--project-root", str(project_root)])
+    assert code == 0
+
+    # Template written to the right place
+    written = list(cfg_home.rglob("config.toml"))
+    assert len(written) == 1
+    content = written[0].read_text(encoding="utf-8")
+    # Mentions every major section, commented so user knows they can opt in
+    assert "[embeddings]" in content
+    assert "enabled                 = true" in content or "enabled = true" in content
+    assert "ollama pull nomic-embed-text" in content
+
+
+def test_init_hooks_preserves_existing_config(tmp_path, monkeypatch):
+    """Second run of init-hooks must NOT overwrite an existing config.toml."""
+    cfg_home = tmp_path / "cfg_home"
+    monkeypatch.setenv("APPDATA", str(cfg_home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg_home))
+
+    # Pre-create a user config with their own edits
+    existing_dir = cfg_home / "claude-recall"
+    existing_dir.mkdir(parents=True)
+    existing = existing_dir / "config.toml"
+    existing.write_text("[search]\nhook_days = 60  # my tuning\n", encoding="utf-8")
+
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    cli.main(["init-hooks", "--project-root", str(project_root)])
+
+    # Left exactly as-is
+    assert existing.read_text(encoding="utf-8") == "[search]\nhook_days = 60  # my tuning\n"
+
+
+def test_embed_batch_truncates_oversized_inputs(monkeypatch):
+    """Issue #8: inputs longer than max_input_chars are truncated before
+    the HTTP call, so one long message can't fail a 32-message batch."""
+    import httpx
+
+    from claude_recall import embeddings as _embeddings
+
+    captured_inputs = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        captured_inputs.append(body["input"])
+        return httpx.Response(200, json={"embeddings": [[0.1] * 8] * len(body["input"])})
+
+    transport = httpx.MockTransport(handler)
+    client = _embeddings.OllamaClient(max_input_chars=100)
+    client._client.close()
+    client._client = httpx.Client(transport=transport, timeout=5.0)
+
+    short = "a" * 50
+    long_ = "b" * 500
+    client.embed_batch([short, long_])
+
+    assert len(captured_inputs) == 1
+    sent = captured_inputs[0]
+    assert len(sent[0]) == 50    # short unchanged
+    assert len(sent[1]) == 100   # long truncated to cap
+
+
+def test_embed_batch_surfaces_ollama_error_body(monkeypatch):
+    """Issue #8 secondary: 400 errors from Ollama include the response body
+    in the EmbeddingError so users can see the actual cause."""
+    import httpx
+
+    from claude_recall import embeddings as _embeddings
+
+    def handler(request):
+        return httpx.Response(
+            400, text="the input length exceeds the context length"
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = _embeddings.OllamaClient()
+    client._client.close()
+    client._client = httpx.Client(transport=transport, timeout=5.0)
+
+    with pytest.raises(_embeddings.EmbeddingError) as exc_info:
+        client.embed_batch(["x"])
+    assert "context length" in str(exc_info.value)
+    assert "400" in str(exc_info.value)
+
+
+def test_embed_falls_back_to_singleton_on_batch_failure(tmp_path, monkeypatch, capsys):
+    """Issue #8 main: when a batch fails, retry each message individually so
+    we only drop the actually-bad ones — not the 31 good ones in the batch."""
+    archive_root = _seed_archive(tmp_path)
+    db_path = tmp_path / "index.db"
+    cfg = _enable_embeddings_cfg(tmp_path, archive_root, db_path)
+
+    # Build a fake client where ANY batch of size >1 fails, singletons succeed
+    # except for one specific message that always fails.
+    class _Selective:
+        def __init__(self):
+            self.calls = []
+
+        def embed_batch(self, texts):
+            import numpy as np
+
+            from claude_recall.embeddings import EmbeddingError
+            self.calls.append(list(texts))
+            if len(texts) > 1:
+                # Simulate "one of the batch has an oversized input"
+                raise EmbeddingError("Ollama 400 from /api/embed: context length")
+            # Single message. Fail on a known-bad one, succeed otherwise.
+            if "unique-bad-token-xyz" in texts[0]:
+                raise EmbeddingError("Ollama 400: context length")
+            v = np.zeros(4, dtype=np.float32)
+            v[0] = 1.0
+            return v.reshape(1, 4)
+
+        def probe(self):
+            from claude_recall.embeddings import ProbeResult
+            return ProbeResult(True, "test", True, True, 4, None)
+
+        def close(self):
+            pass
+
+    # Inject one oversized-shaped message into the archive so there's
+    # something specifically bad to drop.
+    bad_file = archive_root / "test-project" / "session_bad.jsonl"
+    bad_file.write_text(
+        '{"type":"user","message":{"role":"user",'
+        '"content":"unique-bad-token-xyz message that will fail"},'
+        '"timestamp":"2026-04-21T14:00:00Z"}\n',
+        encoding="utf-8",
+    )
+
+    fake = _Selective()
+    from claude_recall import cli as _cli
+    monkeypatch.setattr(
+        _cli, "_ollama_client_factory",
+        lambda base_url, model, timeout, **kw: fake,
+    )
+
+    cli.main(["--config", str(cfg), "index"])
+    capsys.readouterr()
+    code = cli.main(["--config", str(cfg), "embed", "--verbose"])
+    capsys.readouterr()
+    # Exit 2 because at least one message was dropped
+    assert code == 2
+    # But most messages should have been recovered by the singleton fallback
+    from claude_recall import storage as _storage
+    conn = _storage.open_db(db_path)
+    try:
+        vec_count = conn.execute("SELECT COUNT(*) FROM message_vectors").fetchone()[0]
+        msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+    finally:
+        conn.close()
+    # At least some messages embedded successfully via fallback
+    assert vec_count > 0
+    # Not all messages — the one with unique-bad-token-xyz is dropped
+    assert vec_count < msg_count
+
+
 def test_init_hooks_force_wipes_managed_events(tmp_path):
     """Issue #4 regression: --force must replace SessionStart + UserPromptSubmit
     wholesale. A pre-existing entry pointing at an old install path (e.g., a
@@ -351,7 +609,9 @@ def test_init_hooks_force_wipes_managed_events(tmp_path):
         "hooks": {
             "PreToolUse": [{"command": "/user/pre-tool-use.sh"}],
             "PostToolUse": [{"command": "/user/post-tool-use.sh"}],
-            "SessionStart": [{"command": "/stale/site-packages/session_start.ps1", "matcher": "startup"}],
+            "SessionStart": [
+                {"command": "/stale/site-packages/session_start.ps1", "matcher": "startup"},
+            ],
             "UserPromptSubmit": [
                 # Mimics OC's manual wiring to a site-packages path before v0.4.1.
                 {"command": "C:/stale/site-packages/native/claude-recall-hook.exe"},
@@ -661,7 +921,9 @@ def _use_fake_ollama(monkeypatch, fake):
     from claude_recall import cli as _cli
     monkeypatch.setattr(
         _cli, "_ollama_client_factory",
-        lambda base_url, model, timeout: fake,
+        # Accept **kwargs so v0.4.3 + later factory-signature additions
+        # (e.g., max_input_chars) don't break the test helper.
+        lambda base_url, model, timeout, **kw: fake,
     )
 
 

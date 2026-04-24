@@ -59,10 +59,12 @@ class OllamaClient:
         base_url: str = DEFAULT_BASE_URL,
         model: str = DEFAULT_MODEL,
         timeout: float = DEFAULT_TIMEOUT,
+        max_input_chars: int | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
+        self.max_input_chars = max_input_chars
         self._client = httpx.Client(timeout=timeout)
 
     def close(self) -> None:
@@ -85,15 +87,35 @@ class OllamaClient:
         Returns a float32 ndarray of shape (len(texts), dim). Preserves input
         order. Raises EmbeddingError on any HTTP or shape failure; validates
         that every returned vector is finite and has non-zero norm.
+
+        When ``max_input_chars`` was passed to the constructor, inputs longer
+        than that limit are truncated before the HTTP call — prevents a
+        single oversized message from failing the whole batch (issue #8).
         """
         if not texts:
             return np.zeros((0, DEFAULT_DIM), dtype=np.float32)
+
+        # Issue #8: pre-truncate so one oversized message doesn't cause
+        # Ollama to reject the whole batch with 400 Bad Request.
+        if self.max_input_chars is not None:
+            texts = [
+                t if len(t) <= self.max_input_chars else t[: self.max_input_chars]
+                for t in texts
+            ]
+
         try:
             resp = self._client.post(
                 f"{self.base_url}/api/embed",
                 json={"model": self.model, "input": texts},
             )
-            resp.raise_for_status()
+            # Issue #8: surface Ollama's response body in the exception. The
+            # raw httpx message ("Client error '400 Bad Request' for url ...")
+            # hides the actual cause ("input length exceeds context length").
+            if resp.status_code >= 400:
+                body = resp.text[:500]  # truncate long HTML errors
+                raise EmbeddingError(
+                    f"Ollama {resp.status_code} from /api/embed: {body or resp.reason_phrase}"
+                )
             data = resp.json()
         except httpx.HTTPError as exc:
             raise EmbeddingError(f"Ollama request failed: {exc}") from exc

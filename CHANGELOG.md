@@ -2,6 +2,77 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.4.3 — 2026-04-24
+
+First-run embeddings-setup UX cluster. Four issues ([#5](https://github.com/LearnedGeek/claude-recall/issues/5), [#6](https://github.com/LearnedGeek/claude-recall/issues/6), [#7](https://github.com/LearnedGeek/claude-recall/issues/7), [#8](https://github.com/LearnedGeek/claude-recall/issues/8))
+from the ANI dogfooder, filed together because individually they were
+low-medium severity but cumulatively killed the turn-on-semantic-rerank
+experience. #8 was silent data loss (27% of messages) so treated as the
+real headliner even though severity ratings were uneven.
+
+### Fixed
+
+- **#5 — `status`: `ollama_reachable` is now honest.** The json/text
+  status probes Ollama unconditionally so users troubleshooting an
+  embeddings-disabled setup can see reachability as standalone diagnostic
+  information. agent-context output (the SessionStart hook path) still
+  skips the probe when embeddings are off to preserve the 2s budget.
+  `embeddings_ready` remains the end-to-end conjunction.
+- **#6 — `init-hooks` scaffolds a `config.toml` template** with every
+  section commented-out and a detailed `[embeddings]` block including
+  the four-step turn-on procedure. Never touches an existing config.
+  First-run output now ends with a one-liner pointing at the
+  INTEGRATION-GUIDE §9 "How do I turn on embeddings?" row.
+- **#7 — `embed --probe` handles cold-start.** Probe timeout is now
+  `max(config_timeout, 30s)` so a 4s model cold-load doesn't register as
+  a network error. When the probe fails with `reachable=true` +
+  `model_present=true` + `"time"` in the error string, the error is
+  rewritten as *"First-call model load can take several seconds; retry
+  once the model is warm"* — actionable instead of misdirecting users
+  into debugging firewalls.
+- **#8 — `embed` no longer loses 27% of the corpus when one message is
+  oversized.** Three-layer fix:
+  - New `[embeddings].max_input_chars` config (default 6000,
+    ~1500 tokens for English) — per-message truncation before Ollama
+    sees the batch. Eliminates the 400 Bad Request from context-length
+    overflow for essentially all typical inputs.
+  - `embed_batch` surfaces Ollama's response body in the
+    `EmbeddingError` message so the cause (*"input length exceeds the
+    context length"*) is visible without reading Ollama's server log.
+  - Per-batch failure fallback: when a batch still fails after
+    truncation (e.g., a weird encoding issue), `embed` retries each
+    message individually instead of dropping all 32. New `dropped`
+    count in the summary line; exit 2 only when drops are non-zero.
+
+### Added
+
+- Per-input character limit configurable via
+  `[embeddings].max_input_chars = 6000`.
+- `embed` summary line reports `N message(s) dropped` when the
+  per-message fallback couldn't recover some inputs.
+
+### Tests
+
+8 new regression tests across the four issues: probe-when-disabled,
+agent-context-skips-probe, probe-cold-start-timeout-and-message,
+config-scaffold-on-first-run, config-preserves-existing, truncation,
+error-body-surfacing, singleton-fallback. Full suite: 152 Python + 62
+C# = 214 passing.
+
+### Upgrading
+
+```bash
+pip install --upgrade "claude_recall[embeddings] @ https://github.com/LearnedGeek/claude-recall/releases/download/v0.4.3/claude_recall-0.4.3-py3-none-win_amd64.whl"
+claude-recall init-hooks --force
+# If embeddings were enabled on v0.4.2 and had drops, re-embed:
+claude-recall embed --rebuild --verbose
+```
+
+The `--rebuild` is worth running if you hit the v0.4.2 silent-drop
+issue (confirm via `claude-recall status | grep messages_without_vectors`
+— if it's non-zero when `vectors_indexed > 0`, you're missing vectors).
+v0.4.3 will successfully embed everything that previously failed.
+
 ## v0.4.2 — 2026-04-23
 
 Bugfix for [issue #4](https://github.com/LearnedGeek/claude-recall/issues/4):

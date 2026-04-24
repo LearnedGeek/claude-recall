@@ -34,6 +34,13 @@ class EmbeddingsConfig:
     rerank_pool_size: int = 50
     request_timeout_seconds: float = 10.0
     batch_size: int = 32
+    # Per-input character truncation cap. nomic-embed-text's context is
+    # ~2048 tokens, which is roughly 6000-8000 English chars. A single
+    # oversized input used to fail the entire 32-message batch (issue #8);
+    # truncating up-front avoids that amplification. 6000 chars is a
+    # conservative default (~1500 tokens) with headroom for the model's
+    # internal overhead.
+    max_input_chars: int = 6000
     # Hook uses --semantic when true AND enabled is true.
     # v0.4: default flipped to true — the C# NativeAOT hook binary brings
     # semantic-on hook latency to ~30-80ms (well under PLAN §7.3's 500ms
@@ -110,6 +117,7 @@ def _load_toml(path: Path) -> Config:
         "rerank_pool_size",
         "request_timeout_seconds",
         "batch_size",
+        "max_input_chars",
         "use_in_hook",
     ):
         val = _dig(data, "embeddings", field_name)

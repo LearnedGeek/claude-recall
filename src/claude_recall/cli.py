@@ -494,8 +494,15 @@ def _cmd_status(args: argparse.Namespace, cfg: Config) -> int:
     )
 
     embeddings_enabled = cfg.embeddings.enabled
-    ollama_reachable = False
-    if embeddings_enabled:
+    # Issue #5: probe Ollama even when [embeddings].enabled is false so the
+    # standalone `ollama_reachable` field is diagnostically honest in
+    # json/text output. For agent-context (the SessionStart hook output
+    # path), skip the probe when embeddings are off — the hook has a
+    # latency budget and there's nothing useful to say about Ollama in
+    # the one-line summary when the feature toggle is off anyway.
+    if args.format == "agent-context" and not embeddings_enabled:
+        ollama_reachable = False
+    else:
         ollama_reachable = _probe_ollama_reachable(cfg)
     embeddings_ready = (
         embeddings_enabled and ollama_reachable and vectors_indexed > 0
@@ -594,9 +601,15 @@ def _cmd_status(args: argparse.Namespace, cfg: Config) -> int:
 # Injectable client factory so tests can mock the Ollama path without
 # patching module-level imports. Production path always returns a real
 # OllamaClient; tests override _ollama_client_factory in the module namespace.
-def _ollama_client_factory(base_url: str, model: str, timeout: float):
+def _ollama_client_factory(base_url: str, model: str, timeout: float,
+                            max_input_chars: int | None = None):
     from . import embeddings as _embeddings
-    return _embeddings.OllamaClient(base_url=base_url, model=model, timeout=timeout)
+    return _embeddings.OllamaClient(
+        base_url=base_url,
+        model=model,
+        timeout=timeout,
+        max_input_chars=max_input_chars,
+    )
 
 
 def _probe_ollama_reachable(cfg: Config) -> bool:
@@ -639,10 +652,18 @@ def _cmd_embed(args: argparse.Namespace, cfg: Config) -> int:
         )
         return 1
 
+    # Issue #7: --probe is interactive and one-shot, so give it enough
+    # headroom for first-call model cold-start (nomic-embed-text loads in
+    # ~4s on typical hardware). The hot-path hook timeout stays short.
+    probe_timeout = max(cfg.embeddings.request_timeout_seconds, 30.0) if args.probe \
+        else cfg.embeddings.request_timeout_seconds
     client = _ollama_client_factory(
         cfg.embeddings.ollama_base_url,
         cfg.embeddings.model,
-        cfg.embeddings.request_timeout_seconds,
+        probe_timeout,
+        # Issue #8: truncate oversized inputs before Ollama sees them so a
+        # single long message can't fail its whole batch.
+        max_input_chars=cfg.embeddings.max_input_chars,
     )
 
     if args.probe:
@@ -650,13 +671,30 @@ def _cmd_embed(args: argparse.Namespace, cfg: Config) -> int:
             result = client.probe()
         finally:
             client.close()
+        # Issue #7: if embed_ok is False but reachability + model are both
+        # fine, the failure is almost certainly a cold-start timeout. Make
+        # the error message actionable instead of letting users think it's
+        # a network problem.
+        error = result.error
+        if (
+            not result.embed_ok
+            and result.ollama_reachable
+            and result.model_present
+            and error is not None
+            and "time" in error.lower()  # 'timed out', 'timeout'
+        ):
+            error = (
+                f"{error} — Ollama is reachable and '{cfg.embeddings.model}' "
+                f"is present. First-call model load can take several seconds; "
+                f"retry `embed --probe` once the model is warm."
+            )
         payload = {
             "ollama_reachable": result.ollama_reachable,
             "version": result.version,
             "model_present": result.model_present,
             "embed_ok": result.embed_ok,
             "dim": result.dim,
-            "error": result.error,
+            "error": error,
         }
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 0 if result.embed_ok else 2
@@ -685,14 +723,25 @@ def _cmd_embed(args: argparse.Namespace, cfg: Config) -> int:
     client.close()
     conn.close()
 
-    print(
+    dropped = report.get("dropped", 0)
+    summary = (
         f"embedded {report['embedded']} messages "
         f"({report['skipped']} already embedded) "
         f"in {report['elapsed']:.2f}s"
     )
+    if dropped:
+        summary += f"; {dropped} message(s) dropped (see stderr)"
+    print(summary)
     if report["errors"]:
-        print(f"  {report['errors']} batch(es) failed — see stderr", file=sys.stderr)
-        return 2
+        print(
+            f"  {report['errors']} batch(es) hit errors; per-message fallback "
+            f"recovered most — see stderr",
+            file=sys.stderr,
+        )
+        # Exit 2 only when messages were actually dropped. A batch error that
+        # the fallback fully recovered from shouldn't fail the exit code.
+        if dropped:
+            return 2
     return 0
 
 
@@ -744,24 +793,13 @@ def _run_embed(
     start = time.monotonic()
     embedded = 0
     errors = 0
+    dropped = 0
     now_iso = datetime.now(UTC).isoformat()
     from . import embeddings as _embeddings
 
-    for i in range(0, total_to_embed, batch_size):
-        batch = rows[i : i + batch_size]
-        texts = [r["content"] for r in batch]
-        try:
-            matrix = client.embed_batch(texts)
-        except _embeddings.EmbeddingError as exc:
-            errors += 1
-            print(
-                f"[embed] batch {i // batch_size} failed: {exc}",
-                file=sys.stderr,
-            )
-            continue
-
-        dim = int(matrix.shape[1])
-        to_insert = [
+    def _insert(batch_rows, matrix, dim):
+        nonlocal embedded
+        payload = [
             (
                 r["msg_id"],
                 _embeddings.pack_vector(matrix[j]),
@@ -769,18 +807,54 @@ def _run_embed(
                 dim,
                 now_iso,
             )
-            for j, r in enumerate(batch)
+            for j, r in enumerate(batch_rows)
         ]
         conn.executemany(
             "INSERT OR REPLACE INTO message_vectors"
             "(msg_id, vector, model, dim, embedded_at) VALUES (?,?,?,?,?)",
-            to_insert,
+            payload,
         )
         conn.commit()
-        embedded += len(batch)
+        embedded += len(batch_rows)
+
+    for i in range(0, total_to_embed, batch_size):
+        batch = rows[i : i + batch_size]
+        texts = [r["content"] for r in batch]
+        try:
+            matrix = client.embed_batch(texts)
+            _insert(batch, matrix, int(matrix.shape[1]))
+            if verbose:
+                print(
+                    f"[embed] {embedded}/{total_to_embed}",
+                    file=sys.stderr,
+                )
+            continue
+        except _embeddings.EmbeddingError as exc:
+            errors += 1
+            print(
+                f"[embed] batch {i // batch_size} failed ({exc}); "
+                f"retrying {len(batch)} message(s) individually",
+                file=sys.stderr,
+            )
+
+        # Issue #8: per-message fallback so one bad message doesn't cost the
+        # whole batch. Typical outcome: 31 singletons succeed, 1 is the
+        # genuine offender and gets dropped.
+        for r in batch:
+            try:
+                matrix = client.embed_batch([r["content"]])
+                _insert([r], matrix, int(matrix.shape[1]))
+            except _embeddings.EmbeddingError as exc:
+                dropped += 1
+                if verbose:
+                    print(
+                        f"[embed]   dropped msg_id={r['msg_id']}: {exc}",
+                        file=sys.stderr,
+                    )
         if verbose:
             print(
-                f"[embed] {embedded}/{total_to_embed} ({dim}-dim)",
+                f"[embed] {embedded}/{total_to_embed}  (fallback: "
+                f"{len(batch) - dropped} recovered, {dropped} dropped)",
                 file=sys.stderr,
             )
 
@@ -788,6 +862,7 @@ def _run_embed(
         "embedded": embedded,
         "skipped": already,
         "errors": errors,
+        "dropped": dropped,
         "elapsed": time.monotonic() - start,
     }
 
@@ -945,11 +1020,75 @@ def _cmd_init_hooks(args: argparse.Namespace, cfg: Config) -> int:
     (hooks_dir / HOOK_VERSION_FILENAME).write_text(
         __version__ + "\n", encoding="utf-8"
     )
+
+    # Issue #6: scaffold a commented config template on first-time setup so
+    # users don't have to triangulate INTEGRATION-GUIDE + --help to turn on
+    # semantic rerank. Never touches an existing config.toml — users who
+    # already have one know what they're doing.
+    config_created = _scaffold_config_template()
+
     print(f"claude-recall: hooks installed at {hooks_dir} (v{__version__})")
     verb = "rewritten" if args.force else "merged"
     print(f"claude-recall: settings {verb} into {settings_path}")
+    if config_created is not None:
+        print(f"claude-recall: config template written to {config_created}")
     print("claude-recall: run `claude-recall index` once to build the index.")
+    print(
+        "claude-recall: to enable semantic rerank, edit the [embeddings] "
+        "section of your config.toml (see INTEGRATION-GUIDE §9 "
+        "\"How do I turn on embeddings?\")."
+    )
     return 0
+
+
+def _scaffold_config_template() -> Path | None:
+    """Write a commented config.toml template if none exists. No-op otherwise."""
+    from .config import default_config_path
+    cfg_path = default_config_path()
+    if cfg_path.exists():
+        return None
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg_path.write_text(CONFIG_TEMPLATE, encoding="utf-8")
+    return cfg_path
+
+
+CONFIG_TEMPLATE = '''# claude-recall configuration
+#
+# All keys below are optional — commented lines show the shipped defaults.
+# Uncomment and edit to override.
+
+# [archive]
+# root = "~/.claude/projects"
+
+# [database]
+# path = "~/.config/claude-recall/index.db"   # %APPDATA%/claude-recall/index.db on Windows
+
+# [search]
+# hook_threshold     = 0.3
+# hook_limit         = 3
+# hook_days          = 30
+# max_injected_tokens = 800
+
+# [indexing]
+# index_tool_blocks = false
+
+# Semantic rerank via Ollama embeddings. Off by default so the tool works
+# zero-dep. To turn on:
+#   1. pip install "claude-recall[embeddings] @ <wheel url>"
+#   2. ollama pull nomic-embed-text
+#   3. claude-recall embed --probe      # sanity-check the Ollama path
+#   4. claude-recall embed              # one-time vector build (~5 min / 25k msgs)
+# See INTEGRATION-GUIDE.md §9 "How do I turn on embeddings?" for details.
+#
+# [embeddings]
+# enabled                 = true
+# use_in_hook             = true           # auto-inject semantic context on every prompt
+# ollama_base_url         = "http://localhost:11434"
+# model                   = "nomic-embed-text"
+# rerank_pool_size        = 50             # top-N FTS5 candidates sent to cosine rerank
+# request_timeout_seconds = 10
+# batch_size              = 32
+'''
 
 
 def _read_installed_hook_version(project_root: Path | None = None) -> str | None:
