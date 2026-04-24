@@ -149,17 +149,13 @@ jobs:
           find dist/ -name "*.whl" -exec cp {} flat/ \;
           ls -la flat/
       - name: Publish to PyPI
-        # Gated on the secret so forks / pre-registration tag pushes don't
-        # fail this job. When the secret is set (production path), twine
-        # uploads; when unset, the step no-ops with a warning.
-        if: ${{ secrets.PYPI_API_TOKEN != '' }}
+        # GitHub Actions disallows `secrets.*` references in step-level `if:`
+        # conditions (documented restriction), so we can't gracefully skip
+        # on missing token. Instead we rely on pypa/gh-action-pypi-publish
+        # to fail loudly with a clear error when no token is available —
+        # which is the right behavior for a release operation anyway.
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           password: ${{ secrets.PYPI_API_TOKEN }}
           packages-dir: flat/
           skip-existing: true
-      - name: Note PyPI publish was skipped (no token)
-        if: ${{ secrets.PYPI_API_TOKEN == '' }}
-        run: |
-          echo "PYPI_API_TOKEN secret not set — skipping PyPI publish."
-          echo "See docs/POST-STRATEGY.md §4.1 and v0.5-PYPI-SETUP.md for setup."

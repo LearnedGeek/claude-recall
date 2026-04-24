@@ -2,7 +2,27 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
-## v0.5.0 — 2026-04-24
+## v0.5.1 — 2026-04-24
+
+CI-only patch. v0.5.0's tag push failed workflow parsing because GitHub
+Actions disallows `secrets.*` references in step-level `if:` conditions
+(I had guarded the new `publish-pypi` step with
+`if: ${{ secrets.PYPI_API_TOKEN != '' }}` for fork-safety, which is an
+invalid expression that breaks the whole workflow). The `build-wheel-*`
+jobs never ran, and nothing was uploaded to PyPI or attached to the
+GitHub Release.
+
+v0.5.1 is the intended v0.5.0 content with the workflow guard removed.
+The underlying fork-safety concern is instead handled by letting
+`pypa/gh-action-pypi-publish` fail with a clear error message when no
+token is set — which is the right behavior for a release operation
+anyway.
+
+No code changes vs v0.5.0 tag. Same pyproject polish, same CHANGELOG
+narrative from v0.5.0 below, same "first PyPI publish" milestone —
+just an extra patch-version tick for the CI fix.
+
+## v0.5.0 — 2026-04-24 (CI parse failure, no artifacts published)
 
 **Distribution milestone: first PyPI publish.** `pip install claude-recall` now
 works globally. No user-visible behavior changes vs v0.4.3; this release
