@@ -74,3 +74,9 @@ project.lock.json
 # Source tree should not contain the binary; wheels do.
 src/claude_recall/native/*.exe
 src/claude_recall/native/*.dll
+
+# Per-developer Claude Code + claude-recall project wiring.
+# .claude/settings.json contains absolute paths to the local install;
+# .claude/hooks/ holds per-install binary copies. Neither should travel
+# across machines via git.
+.claude/
