@@ -119,3 +119,47 @@ jobs:
               --repo ${{ github.repository }} --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-pypi:
+    # Upload the freshly-built wheels to PyPI on tag push. Skipped when the
+    # PYPI_API_TOKEN secret isn't set (e.g., in a fork or before the owner
+    # has registered the package on PyPI), so this never turns CI red for
+    # infrastructure reasons.
+    needs: [build-wheel-win-x64, build-wheel-any]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment:
+      # Optional GitHub Environment for added approval gate; harmless if
+      # the environment doesn't exist (GitHub treats it as open).
+      name: pypi
+      url: https://pypi.org/project/claude-recall/
+    permissions:
+      # Required if we ever switch to PyPI Trusted Publishing (OIDC).
+      # Harmless for the token-based path we start with.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/
+      - name: Flatten wheels into dist/
+        # download-artifact@v4 puts each artifact in a subdir; twine wants
+        # them all in one directory.
+        run: |
+          mkdir -p flat/
+          find dist/ -name "*.whl" -exec cp {} flat/ \;
+          ls -la flat/
+      - name: Publish to PyPI
+        # Gated on the secret so forks / pre-registration tag pushes don't
+        # fail this job. When the secret is set (production path), twine
+        # uploads; when unset, the step no-ops with a warning.
+        if: ${{ secrets.PYPI_API_TOKEN != '' }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: flat/
+          skip-existing: true
+      - name: Note PyPI publish was skipped (no token)
+        if: ${{ secrets.PYPI_API_TOKEN == '' }}
+        run: |
+          echo "PYPI_API_TOKEN secret not set — skipping PyPI publish."
+          echo "See docs/POST-STRATEGY.md §4.1 and v0.5-PYPI-SETUP.md for setup."

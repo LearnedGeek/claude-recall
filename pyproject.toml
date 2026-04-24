@@ -12,19 +12,38 @@ authors = [
     {name = "Mark McArthey", email = "markm@learnedgeek.com"},
 ]
 requires-python = ">=3.11"
-keywords = ["claude", "claude-code", "session", "memory", "fts5", "hooks"]
+keywords = [
+    "claude",
+    "claude-code",
+    "session",
+    "memory",
+    "fts5",
+    "hooks",
+    "search",
+    "semantic-search",
+    "ollama",
+    "embeddings",
+    "rag",
+]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Documentation",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Database :: Database Engines/Servers",
+    "Topic :: Text Processing :: Indexing",
     "Topic :: Utilities",
+    "Typing :: Typed",
 ]
 dependencies = []
 
@@ -44,7 +63,11 @@ claude-recall = "claude_recall.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/LearnedGeek/claude-recall"
+Repository = "https://github.com/LearnedGeek/claude-recall"
+Documentation = "https://github.com/LearnedGeek/claude-recall/blob/main/docs/INTEGRATION-GUIDE.md"
 Issues = "https://github.com/LearnedGeek/claude-recall/issues"
+Changelog = "https://github.com/LearnedGeek/claude-recall/blob/main/CHANGELOG.md"
+Releases = "https://github.com/LearnedGeek/claude-recall/releases"
 
 [tool.setuptools.packages.find]
 where = ["src"]
