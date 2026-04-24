@@ -339,6 +339,72 @@ def test_init_hooks_uses_native_binary_when_present(tmp_path, monkeypatch):
     assert any("claude-recall-hook.exe" in c for c in ups_cmds)
 
 
+def test_search_project_filter_is_case_insensitive(cli_env, capsys):
+    """Issue #13: --project should match regardless of case. Stored slug is
+    "test-project" (lowercase); passing "TEST-PROJECT" used to return 0."""
+    cli_env["run"]("index")
+    capsys.readouterr()
+    code, out, _ = cli_env["run"](
+        "search", "regex", "--project", "TEST-PROJECT", "--format", "json"
+    )
+    assert code == 0
+    payload = json.loads(out)
+    assert payload["total_matches"] >= 1, "case-insensitive project filter failed"
+
+
+def test_list_project_filter_is_case_insensitive(cli_env, capsys):
+    """Same fix surface as search; list's --project also case-insensitive."""
+    cli_env["run"]("index")
+    capsys.readouterr()
+    code, out, _ = cli_env["run"](
+        "list", "--project", "TEST-PROJECT", "--format", "json"
+    )
+    assert code == 0
+    rows = json.loads(out)
+    assert len(rows) >= 1
+
+
+def test_status_integrity_check_reports_row_counts(cli_env, capsys):
+    """--integrity-check prints global counts + per-project breakdown."""
+    cli_env["run"]("index")
+    capsys.readouterr()
+    code, out, _ = cli_env["run"]("status", "--integrity-check")
+    assert code == 0
+    assert "global:" in out
+    assert "per-project:" in out
+    assert "test-project" in out
+
+
+def test_status_integrity_check_flags_fts_mismatch(tmp_path, monkeypatch, capsys):
+    """When messages vs messages_fts row counts disagree, integrity check
+    surfaces a warning — the exact trigger-didn't-fire hypothesis from #13."""
+    archive_root = _seed_archive(tmp_path)
+    db_path = tmp_path / "index.db"
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        f'[archive]\nroot = "{archive_root.as_posix()}"\n'
+        f'[database]\npath = "{db_path.as_posix()}"\n',
+        encoding="utf-8",
+    )
+    cli.main(["--config", str(cfg), "index"])
+    capsys.readouterr()
+
+    # Delete FTS rows to simulate the trigger-missed-insert case.
+    from claude_recall import storage as _storage
+    conn = _storage.open_db(db_path)
+    try:
+        conn.execute("DELETE FROM messages_fts WHERE rowid > 5")
+        conn.commit()
+    finally:
+        conn.close()
+
+    code = cli.main(["--config", str(cfg), "status", "--integrity-check"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "messages_fts" in out
+    assert "FTS trigger" in out or "messages_fts" in out
+
+
 def test_status_probes_ollama_even_when_embeddings_disabled(tmp_path, monkeypatch, capsys):
     """Issue #5: `ollama_reachable` in json/text status reflects actual
     reachability, not the `[embeddings].enabled` config toggle."""

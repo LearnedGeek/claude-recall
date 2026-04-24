@@ -2,6 +2,68 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.5.3 — 2026-04-24
+
+Dogfooding dispatch for [issue #13](https://github.com/LearnedGeek/claude-recall/issues/13) —
+`--project` filter returning zero matches for an indexed CrewTrack
+session despite `list` showing it with 5622 turns. This release ships
+one confirmed fix (case-insensitive project filter) plus the
+diagnostic tooling needed to pinpoint the actual root cause of OC's
+specific symptom (which was not casing).
+
+### Fixed
+
+- **`--project <slug>` filter is now case-insensitive** across
+  `search`, `list`, and `embed`. Both `E--Foo` and `e--foo` forms now
+  match whatever case is stored. The `--project auto` path already
+  normalized via `projects.resolve_project_slug`; the explicit form
+  did not. (Not the root cause of #13 — OC ruled out casing — but the
+  right behavior regardless, and cheap to fix at the same time.)
+
+### Added
+
+- **`claude-recall status --integrity-check`** — runs consistency
+  queries against the index and prints:
+  - Global row counts: sessions / messages / messages_fts
+  - Flags mismatches between messages and messages_fts (the
+    trigger-didn't-fire case)
+  - Per-session: stored `turn_count` vs actual messages-row count
+    (catches "session exists but has no joinable messages" — the
+    leading hypothesis for #13)
+  - Per-project breakdown: sessions, stored turns, actual messages,
+    vectors
+  - Orphan message detection (session_id pointing at missing session)
+
+  Use this when `--project` returns zero and you can't figure out why.
+
+### Tests
+
+4 new regression cases:
+- `search --project` mixed-case matches correctly
+- `list --project` mixed-case matches correctly
+- `status --integrity-check` reports global + per-project counts
+- `status --integrity-check` flags FTS row-count mismatch (simulates
+  the trigger-missed-inserts hypothesis)
+
+Full suite: 156 Python + 62 C# = 218 passing.
+
+### Not yet fixed
+
+The root cause of [#13](https://github.com/LearnedGeek/claude-recall/issues/13)
+on OC's specific archive. Casing was ruled out; other hypotheses
+(session row without matching messages, FTS row mismatch, orphan state)
+can now be confirmed or disproven with one `claude-recall status
+--integrity-check` against OC's DB. Fix will land in v0.5.4 once the
+actual failure mode is identified.
+
+### Upgrading
+
+```bash
+pip install --upgrade 'claude-recall[embeddings]'
+```
+
+No `init-hooks --force` needed — no hook-binary changes in this release.
+
 ## v0.5.2 — 2026-04-24
 
 Fixes the four issues filed against v0.5.1's PyPI landing-page and hook

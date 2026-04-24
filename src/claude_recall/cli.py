@@ -101,6 +101,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_status.add_argument(
         "--format", choices=["json", "text", "agent-context"], default="text"
     )
+    p_status.add_argument(
+        "--integrity-check",
+        action="store_true",
+        help=(
+            "Run consistency queries against the index: per-project message "
+            "counts, sessions vs. messages vs. messages_fts row-count "
+            "agreement, orphan detection. Surfaces data-integrity issues "
+            "that don't show up in normal status output."
+        ),
+    )
 
     # init-hooks
     p_init = sub.add_parser("init-hooks", help="Wire hooks into a project.")
@@ -394,7 +404,12 @@ def _cmd_list(args: argparse.Namespace, cfg: Config) -> int:
         )
         params: list = []
         if args.project:
-            sql += " AND s.project_slug = ?"
+            # Case-insensitive: match whether caller passed "E--Foo" or
+            # "e--foo" regardless of the case actually stored. (Issue #13
+            # context: casing was NOT the root cause for CrewTrack, but
+            # this is still the right behavior — both cases are valid
+            # Claude Code slug forms in the wild.)
+            sql += " AND LOWER(s.project_slug) = LOWER(?)"
             params.append(args.project)
         sql += " ORDER BY s.started_at DESC LIMIT ?"
         params.append(args.limit)
@@ -437,6 +452,8 @@ def _cmd_list(args: argparse.Namespace, cfg: Config) -> int:
 # --- status -----------------------------------------------------------------
 
 def _cmd_status(args: argparse.Namespace, cfg: Config) -> int:
+    if getattr(args, "integrity_check", False):
+        return _run_integrity_check(cfg)
     archive_accessible = cfg.archive_root.is_dir()
     db_path = cfg.db_path
     db_accessible = False
@@ -615,6 +632,131 @@ def _ollama_client_factory(base_url: str, model: str, timeout: float,
     )
 
 
+def _run_integrity_check(cfg: Config) -> int:
+    """Diagnose index consistency. Added for issue #13 triage.
+
+    Reports:
+    - Per-project-slug: sessions count, messages count (via join), stored
+      turn_count total, gap between stored turn_count and actual message
+      count (the symptom for "session exists but --project filter
+      returns nothing")
+    - Global: messages row count vs messages_fts row count (catches
+      trigger-didn't-fire case)
+    - Global: sessions with zero messages despite turn_count > 0
+    - Global: orphan messages (session_id pointing at missing sessions row)
+    """
+    try:
+        conn = storage.open_db(cfg.db_path)
+    except storage.StorageError as exc:
+        print(f"database error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        print(f"integrity check of {cfg.db_path}")
+        print()
+
+        # Global row counts
+        msg_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM messages"
+        ).fetchone()["c"]
+        fts_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM messages_fts"
+        ).fetchone()["c"]
+        sessions_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM sessions"
+        ).fetchone()["c"]
+        print(
+            f"global: {sessions_count} sessions / {msg_count} messages / "
+            f"{fts_count} messages_fts rows"
+        )
+        if msg_count != fts_count:
+            print(
+                f"  ⚠ messages ({msg_count}) != messages_fts ({fts_count}) — "
+                f"FTS trigger may have missed inserts; search will return "
+                f"inconsistent results"
+            )
+
+        # Per-session: stored turn_count vs actual messages rows
+        gaps = conn.execute(
+            """
+            SELECT s.project_slug, s.session_id, s.turn_count,
+                   COUNT(m.msg_id) AS actual_msgs
+            FROM sessions s
+            LEFT JOIN messages m ON m.session_id = s.session_id
+            GROUP BY s.session_id
+            HAVING s.turn_count != COUNT(m.msg_id)
+            ORDER BY ABS(s.turn_count - COUNT(m.msg_id)) DESC
+            """
+        ).fetchall()
+        if gaps:
+            print()
+            print(
+                f"sessions where stored turn_count != actual messages "
+                f"row count: {len(gaps)}"
+            )
+            for row in gaps[:20]:
+                diff = row["turn_count"] - row["actual_msgs"]
+                print(
+                    f"  {row['project_slug']}  session={row['session_id'][:12]}"
+                    f"  turn_count={row['turn_count']}  "
+                    f"actual_msgs={row['actual_msgs']}  diff={diff:+d}"
+                )
+            if len(gaps) > 20:
+                print(f"  ... and {len(gaps) - 20} more")
+        else:
+            print()
+            print("per-session turn_count matches actual messages row count")
+
+        # Per-project breakdown
+        print()
+        print("per-project:")
+        breakdown = conn.execute(
+            """
+            SELECT s.project_slug,
+                   COUNT(DISTINCT s.session_id) AS sessions,
+                   SUM(s.turn_count) AS stored_turns,
+                   COUNT(m.msg_id) AS actual_msgs,
+                   COUNT(v.msg_id) AS vectors
+            FROM sessions s
+            LEFT JOIN messages m ON m.session_id = s.session_id
+            LEFT JOIN message_vectors v ON v.msg_id = m.msg_id
+            GROUP BY s.project_slug
+            ORDER BY s.project_slug
+            """
+        ).fetchall()
+        for row in breakdown:
+            flag = ""
+            if row["stored_turns"] != row["actual_msgs"]:
+                flag = "  ⚠ turn_count/messages mismatch"
+            print(
+                f"  {row['project_slug']:60s}  "
+                f"sessions={row['sessions']:>3}  "
+                f"stored_turns={row['stored_turns']:>5}  "
+                f"actual_msgs={row['actual_msgs']:>5}  "
+                f"vectors={row['vectors']:>5}{flag}"
+            )
+
+        # Orphan messages (session_id missing from sessions table)
+        orphans = conn.execute(
+            """
+            SELECT COUNT(*) AS c FROM messages m
+            WHERE NOT EXISTS (
+                SELECT 1 FROM sessions s WHERE s.session_id = m.session_id
+            )
+            """
+        ).fetchone()["c"]
+        if orphans > 0:
+            print()
+            print(
+                f"⚠ orphan messages (session_id not in sessions table): "
+                f"{orphans}"
+            )
+
+        return 0
+    finally:
+        conn.close()
+
+
 def _probe_ollama_reachable(cfg: Config) -> bool:
     """Best-effort reachability probe for the status command. Never raises."""
     try:
@@ -770,7 +912,7 @@ def _run_embed(
                 "DELETE FROM message_vectors "
                 "WHERE msg_id IN (SELECT m.msg_id FROM messages m "
                 "JOIN sessions s ON s.session_id = m.session_id "
-                "WHERE s.project_slug = ?)",
+                "WHERE LOWER(s.project_slug) = LOWER(?))",
                 (project_slug,),
             )
         else:
@@ -785,7 +927,7 @@ def _run_embed(
     )
     params: list = []
     if project_slug:
-        sql += " AND s.project_slug = ?"
+        sql += " AND LOWER(s.project_slug) = LOWER(?)"
         params.append(project_slug)
     sql += " ORDER BY m.msg_id"
 

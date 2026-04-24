@@ -125,7 +125,14 @@ def run_search(
     """
     tail_params: list = [cutoff_iso]
     if project_slug:
-        sql += " AND s.project_slug = ?"
+        # Case-insensitive match so callers can pass either the canonical
+        # lowercase form (`e--Documents-dev-Foo`) or the legacy Claude Code
+        # uppercase form (`E--Documents-dev-Foo`) and still find matches
+        # against whatever case is actually stored. The `--project auto`
+        # path already normalizes via projects.resolve_project_slug; the
+        # explicit form previously did not, producing the surprising
+        # "list shows it but search returns nothing" symptom.
+        sql += " AND LOWER(s.project_slug) = LOWER(?)"
         tail_params.append(project_slug)
     sql += " ORDER BY bm25(messages_fts) ASC"
     if pool is not None:
