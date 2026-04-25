@@ -2,6 +2,57 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.5.4 — 2026-04-25
+
+Critical hook-shape fix for [issue #15](https://github.com/LearnedGeek/claude-recall/issues/15).
+Through v0.5.3, `init-hooks` generated the deprecated flat hook shape
+`{command, matcher}` instead of the schema-required nested shape
+`{matcher?, hooks: [{type, command, ...}]}`. Claude Code's parser used
+to accept both leniently; a recent strict-validation pass now rejects
+the flat shape outright with the message:
+
+> Settings file failed to parse `<repo>/.claude/settings.json` —
+> Expected array, but received undefined. Permission rules and other
+> settings from this file are not in effect.
+
+This **silently disabled the host project's settings as a side effect**
+— not just claude-recall's hooks, but every permission rule, env var,
+and unrelated hook in the same file. Anyone who ran `init-hooks` from
+v0.4 onward on Windows is affected.
+
+### Migration
+
+```
+pip install --upgrade claude-recall
+claude-recall init-hooks --force
+```
+
+`--force` rewrites the two events claude-recall manages
+(`SessionStart`, `UserPromptSubmit`); other hook events are preserved.
+
+### Fixed
+
+- **`init-hooks` now emits the schema-correct nested shape.** Each
+  matcher entry contains a `hooks: [{type: "command", command: "..."}]`
+  array, matching the canonical Claude Code settings schema.
+- **`shell: "powershell"` is set on `.ps1` hooks.** Without this, bash
+  (the default hook shell) tries to execute the raw `.ps1` path as a
+  binary and fails silently — even with the shape fix in place. Other
+  shells fall through to the default.
+- **De-dup logic walks the nested `hooks` array** when checking
+  whether a command is already registered, so re-running `init-hooks`
+  without `--force` doesn't double-add entries.
+
+### Tests
+
+- New regression test
+  (`test_init_hooks_emits_schema_correct_nested_shape`) asserts that
+  `command` never appears at the top level of a matcher entry, that
+  `hooks` is always a list with `type: "command"` inner entries, and
+  that `.ps1` commands carry `shell: "powershell"`.
+- Existing init-hooks tests updated to assert against the new shape
+  via a shared `_hook_commands()` helper.
+
 ## v0.5.3 — 2026-04-24
 
 Dogfooding dispatch for [issue #13](https://github.com/LearnedGeek/claude-recall/issues/13) —

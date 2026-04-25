@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claude-recall"
-version = "0.5.3"
+version = "0.5.4"
 description = "Automatic, cheap, precise query of Claude Code session archives via SQLite FTS5 + hooks."
 readme = "README.md"
 license = {file = "LICENSE"}

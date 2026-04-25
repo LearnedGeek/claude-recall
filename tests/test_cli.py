@@ -335,8 +335,22 @@ def test_init_hooks_uses_native_binary_when_present(tmp_path, monkeypatch):
     settings = json.loads(
         (project_root / ".claude" / "settings.json").read_text(encoding="utf-8")
     )
-    ups_cmds = [e["command"] for e in settings["hooks"]["UserPromptSubmit"]]
+    ups_cmds = _hook_commands(settings["hooks"]["UserPromptSubmit"])
     assert any("claude-recall-hook.exe" in c for c in ups_cmds)
+
+
+def _hook_commands(entries: list) -> list[str]:
+    """Extract command strings from the schema-correct nested-array shape.
+
+    Each entry is `{matcher?: str, hooks: [{type: "command", command: str, ...}]}`.
+    """
+    out: list[str] = []
+    for entry in entries:
+        for inner in entry.get("hooks", []):
+            cmd = inner.get("command")
+            if isinstance(cmd, str):
+                out.append(cmd)
+    return out
 
 
 def test_search_project_filter_is_case_insensitive(cli_env, capsys):
@@ -673,14 +687,27 @@ def test_init_hooks_force_wipes_managed_events(tmp_path):
 
     stale = {
         "hooks": {
-            "PreToolUse": [{"command": "/user/pre-tool-use.sh"}],
-            "PostToolUse": [{"command": "/user/post-tool-use.sh"}],
+            "PreToolUse": [
+                {"hooks": [{"type": "command", "command": "/user/pre-tool-use.sh"}]},
+            ],
+            "PostToolUse": [
+                {"hooks": [{"type": "command", "command": "/user/post-tool-use.sh"}]},
+            ],
             "SessionStart": [
-                {"command": "/stale/site-packages/session_start.ps1", "matcher": "startup"},
+                {
+                    "matcher": "startup",
+                    "hooks": [
+                        {"type": "command", "command": "/stale/site-packages/session_start.ps1"},
+                    ],
+                },
             ],
             "UserPromptSubmit": [
                 # Mimics OC's manual wiring to a site-packages path before v0.4.1.
-                {"command": "C:/stale/site-packages/native/claude-recall-hook.exe"},
+                {
+                    "hooks": [
+                        {"type": "command", "command": "C:/stale/site-packages/native/claude-recall-hook.exe"},
+                    ],
+                },
             ],
         }
     }
@@ -692,16 +719,20 @@ def test_init_hooks_force_wipes_managed_events(tmp_path):
 
     merged = json.loads(settings_path.read_text(encoding="utf-8"))
 
-    # Events we don't manage are preserved.
-    assert merged["hooks"]["PreToolUse"] == [{"command": "/user/pre-tool-use.sh"}]
-    assert merged["hooks"]["PostToolUse"] == [{"command": "/user/post-tool-use.sh"}]
+    # Events we don't manage are preserved verbatim.
+    assert merged["hooks"]["PreToolUse"] == stale["hooks"]["PreToolUse"]
+    assert merged["hooks"]["PostToolUse"] == stale["hooks"]["PostToolUse"]
 
     # Events we DO manage should have exactly one entry each (the generated one).
     assert len(merged["hooks"]["SessionStart"]) == 1
-    assert "stale" not in merged["hooks"]["SessionStart"][0]["command"]
+    assert all(
+        "stale" not in c for c in _hook_commands(merged["hooks"]["SessionStart"])
+    )
 
     assert len(merged["hooks"]["UserPromptSubmit"]) == 1
-    assert "stale" not in merged["hooks"]["UserPromptSubmit"][0]["command"]
+    assert all(
+        "stale" not in c for c in _hook_commands(merged["hooks"]["UserPromptSubmit"])
+    )
 
     # .bak still written as a safety net.
     assert (project_root / ".claude" / "settings.json.bak").exists()
@@ -716,7 +747,13 @@ def test_init_hooks_without_force_preserves_pre_existing_user_hooks(tmp_path):
     (project_root / ".claude").mkdir(parents=True)
     existing = {
         "hooks": {
-            "UserPromptSubmit": [{"command": "/user/pre-existing-prompt-hook.sh"}],
+            "UserPromptSubmit": [
+                {
+                    "hooks": [
+                        {"type": "command", "command": "/user/pre-existing-prompt-hook.sh"},
+                    ],
+                },
+            ],
         }
     }
     (project_root / ".claude" / "settings.json").write_text(
@@ -728,7 +765,7 @@ def test_init_hooks_without_force_preserves_pre_existing_user_hooks(tmp_path):
     merged = json.loads(
         (project_root / ".claude" / "settings.json").read_text(encoding="utf-8")
     )
-    cmds = [e["command"] for e in merged["hooks"]["UserPromptSubmit"]]
+    cmds = _hook_commands(merged["hooks"]["UserPromptSubmit"])
     assert "/user/pre-existing-prompt-hook.sh" in cmds
     assert len(cmds) == 2  # pre-existing + generated
 
@@ -790,7 +827,7 @@ def test_init_hooks_binary_only_wheel_skips_session_start(tmp_path, monkeypatch,
     )
     # UserPromptSubmit is wired at the binary; SessionStart absent from settings.
     assert "SessionStart" not in settings["hooks"]
-    ups_cmds = [e["command"] for e in settings["hooks"]["UserPromptSubmit"]]
+    ups_cmds = _hook_commands(settings["hooks"]["UserPromptSubmit"])
     assert any("claude-recall-hook.exe" in c for c in ups_cmds)
 
 
@@ -820,7 +857,7 @@ def test_init_hooks_pure_python_wheel_wires_shell_hook(tmp_path, monkeypatch):
     settings = json.loads(
         (project_root / ".claude" / "settings.json").read_text(encoding="utf-8")
     )
-    ups_cmds = [e["command"] for e in settings["hooks"]["UserPromptSubmit"]]
+    ups_cmds = _hook_commands(settings["hooks"]["UserPromptSubmit"])
     # Shell hook, not .exe
     assert all("claude-recall-hook.exe" not in c for c in ups_cmds)
 
@@ -902,8 +939,17 @@ def test_init_hooks_preserves_existing_hooks(tmp_path, capsys):
     (project_root / ".claude").mkdir(parents=True)
     existing = {
         "hooks": {
-            "PreToolUse": [{"command": "/some/other/script.sh"}],
-            "SessionStart": [{"command": "/pre-existing.sh", "matcher": "startup"}],
+            "PreToolUse": [
+                {"hooks": [{"type": "command", "command": "/some/other/script.sh"}]},
+            ],
+            "SessionStart": [
+                {
+                    "matcher": "startup",
+                    "hooks": [
+                        {"type": "command", "command": "/pre-existing.sh"},
+                    ],
+                },
+            ],
         }
     }
     settings_path = project_root / ".claude" / "settings.json"
@@ -912,10 +958,10 @@ def test_init_hooks_preserves_existing_hooks(tmp_path, capsys):
     code = cli.main(["init-hooks", "--project-root", str(project_root)])
     assert code == 0
     merged = json.loads(settings_path.read_text(encoding="utf-8"))
-    # Pre-existing PreToolUse still there
-    assert merged["hooks"]["PreToolUse"] == [{"command": "/some/other/script.sh"}]
+    # Pre-existing PreToolUse still there verbatim
+    assert merged["hooks"]["PreToolUse"] == existing["hooks"]["PreToolUse"]
     # SessionStart has both the pre-existing and our new one
-    commands = {e["command"] for e in merged["hooks"]["SessionStart"]}
+    commands = set(_hook_commands(merged["hooks"]["SessionStart"]))
     assert "/pre-existing.sh" in commands
     assert any("session_start" in c for c in commands)
 
@@ -934,6 +980,46 @@ def test_init_hooks_idempotent(tmp_path):
     )
     assert len(settings["hooks"]["SessionStart"]) == 1
     assert len(settings["hooks"]["UserPromptSubmit"]) == 1
+
+
+def test_init_hooks_emits_schema_correct_nested_shape(tmp_path):
+    """Issue #15 regression: settings.json must use the nested-array shape
+    Claude Code's parser requires. Each matcher entry must be
+    `{matcher?, hooks: [{type: "command", command, shell?}]}`. The flat
+    `{command, matcher}` shape we shipped through v0.5.3 was rejected with
+    "Expected array, but received undefined" and silently disabled the host
+    project's settings as a side effect.
+    """
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    code = cli.main(["init-hooks", "--project-root", str(project_root)])
+    assert code == 0
+    settings = json.loads(
+        (project_root / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+
+    for event in ("SessionStart", "UserPromptSubmit"):
+        assert event in settings["hooks"]
+        for matcher_entry in settings["hooks"][event]:
+            # The bug was emitting `command` directly on the matcher entry.
+            assert "command" not in matcher_entry, (
+                f"{event} entry has `command` at top level — flat shape regressed: "
+                f"{matcher_entry!r}"
+            )
+            assert isinstance(matcher_entry.get("hooks"), list), (
+                f"{event} entry missing required `hooks` array: {matcher_entry!r}"
+            )
+            for inner in matcher_entry["hooks"]:
+                assert inner.get("type") == "command", (
+                    f"{event} inner hook missing `type: \"command\"`: {inner!r}"
+                )
+                assert isinstance(inner.get("command"), str)
+                # PowerShell scripts on Windows must declare shell=powershell —
+                # bash (the default hook shell) can't execute a raw .ps1 path.
+                if inner["command"].lower().endswith(".ps1"):
+                    assert inner.get("shell") == "powershell", (
+                        f".ps1 hook missing shell=powershell: {inner!r}"
+                    )
 
 
 # ---- v0.3 embed command ----

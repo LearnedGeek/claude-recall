@@ -1283,15 +1283,32 @@ def _read_installed_hook_version(project_root: Path | None = None) -> str | None
 def _merge_hook(
     hooks_block: dict, event: str, command: str, matcher: str | None
 ) -> None:
-    """Insert a hook entry unless one with the same command already exists."""
+    """Insert a hook entry unless one with the same command already exists.
+
+    Emits the nested-array shape Claude Code's settings schema requires
+    (issue #15): each matcher entry contains a `hooks: [{type, command, ...}]`
+    array. The flat `{command, matcher}` shape we shipped through v0.5.3 is
+    rejected by the parser with "Expected array, but received undefined" and
+    silently disables the host project's settings as a side effect. Bash —
+    the default hook shell — also can't execute a raw `.ps1` path, so add
+    `shell: "powershell"` when the command points at one.
+    """
     entries = hooks_block.setdefault(event, [])
     if not isinstance(entries, list):
         entries = []
         hooks_block[event] = entries
     for e in entries:
-        if isinstance(e, dict) and e.get("command") == command:
-            return
-    entry: dict = {"command": command}
+        if isinstance(e, dict):
+            inner = e.get("hooks")
+            if isinstance(inner, list) and any(
+                isinstance(h, dict) and h.get("command") == command
+                for h in inner
+            ):
+                return
+    cmd_entry: dict = {"type": "command", "command": command}
+    if command.lower().endswith(".ps1"):
+        cmd_entry["shell"] = "powershell"
+    entry: dict = {"hooks": [cmd_entry]}
     if matcher is not None:
         entry["matcher"] = matcher
     entries.append(entry)
