@@ -8,8 +8,10 @@ Critical hook-shape fix for [issue #15](https://github.com/LearnedGeek/claude-re
 Through v0.5.3, `init-hooks` generated the deprecated flat hook shape
 `{command, matcher}` instead of the schema-required nested shape
 `{matcher?, hooks: [{type, command, ...}]}`. Claude Code's parser used
-to accept both leniently; a recent strict-validation pass now rejects
-the flat shape outright with the message:
+to accept both leniently; the strict-validation pass introduced in
+[Claude Code v2.1.118](https://github.com/anthropics/claude-code/releases/tag/v2.1.118)
+(April 23, 2026, same release that added `type: "mcp_tool"` hooks)
+rejects the flat shape outright with the message:
 
 > Settings file failed to parse `<repo>/.claude/settings.json` —
 > Expected array, but received undefined. Permission rules and other
