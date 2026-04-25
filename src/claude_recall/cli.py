@@ -522,8 +522,22 @@ def _cmd_status(args: argparse.Namespace, cfg: Config) -> int:
         ollama_reachable = False
     else:
         ollama_reachable = _probe_ollama_reachable(cfg)
+    # Issue #16: vectors_indexed > 0 was too lenient — reported `ready` at
+    # 16% coverage when search returned "no vectors" because the surviving
+    # vectors didn't intersect the FTS5 candidate pool. Require ≥95% coverage
+    # to call ourselves ready. The 5% slack absorbs in-flight index-vs-embed
+    # races (a session indexed seconds ago hasn't been embedded yet) without
+    # masking the real orphan-after-cascade case (#16's 16% surface).
+    if total_messages > 0:
+        vectors_coverage = vectors_indexed / total_messages
+    else:
+        vectors_coverage = 1.0
+    EMBED_COVERAGE_THRESHOLD = 0.95
     embeddings_ready = (
-        embeddings_enabled and ollama_reachable and vectors_indexed > 0
+        embeddings_enabled
+        and ollama_reachable
+        and vectors_indexed > 0
+        and vectors_coverage >= EMBED_COVERAGE_THRESHOLD
     )
 
     payload = {
@@ -541,6 +555,7 @@ def _cmd_status(args: argparse.Namespace, cfg: Config) -> int:
         "ollama_reachable": ollama_reachable,
         "vectors_indexed": vectors_indexed,
         "messages_without_vectors": messages_without_vectors,
+        "vectors_coverage": round(vectors_coverage, 4),
         "checks": {
             "archive_accessible": archive_accessible,
             "db_accessible": db_accessible,
@@ -577,9 +592,17 @@ def _cmd_status(args: argparse.Namespace, cfg: Config) -> int:
                         "(run `claude-recall embed`)."
                     )
                 elif messages_without_vectors > 0:
+                    # Issue #16: distinguish low coverage (orphan-after-cascade
+                    # surface, semantic search broken) from a few in-flight
+                    # unembedded messages. The pct in the message gives the
+                    # user enough signal to know whether to embed-now or
+                    # ignore-til-later.
+                    pct = int(vectors_coverage * 100)
                     line += (
-                        f". Embeddings: {messages_without_vectors:,} "
-                        f"messages unembedded (run `claude-recall embed`)."
+                        f". Embeddings: {pct}% coverage "
+                        f"({vectors_indexed:,}/{total_messages:,}, "
+                        f"{messages_without_vectors:,} unembedded — "
+                        f"run `claude-recall embed`)."
                     )
             if hooks_stale:
                 line += (
@@ -603,6 +626,7 @@ def _cmd_status(args: argparse.Namespace, cfg: Config) -> int:
         print(f"ollama_reachable:     {payload['ollama_reachable']}")
         print(f"vectors_indexed:      {payload['vectors_indexed']}")
         print(f"messages_without_vectors: {payload['messages_without_vectors']}")
+        print(f"vectors_coverage:     {payload['vectors_coverage']:.2%}")
         print("checks:")
         for k, v in payload["checks"].items():
             print(f"  {k}: {v}")
@@ -610,6 +634,24 @@ def _cmd_status(args: argparse.Namespace, cfg: Config) -> int:
             print(
                 f"\nhooks are stale: v{installed_hook_version} installed, "
                 f"v{__version__} is current. Run `claude-recall init-hooks --force`."
+            )
+        # Issue #16: surface the orphan-vector situation prominently when
+        # we're embeddings-enabled but coverage has dropped below the
+        # threshold. Mirrors the hooks-stale block — it's the diagnostic
+        # the user needs to find without having to manually do the math.
+        if (
+            embeddings_enabled
+            and ollama_reachable
+            and total_messages > 0
+            and vectors_coverage < EMBED_COVERAGE_THRESHOLD
+        ):
+            print(
+                f"\nvectors are stale: {messages_without_vectors:,} of "
+                f"{total_messages:,} messages have no embedding "
+                f"({vectors_coverage:.1%} coverage). Routine indexing "
+                f"orphans vectors via FK CASCADE on session re-ingest "
+                f"(see issue #16); run `claude-recall embed` to restore "
+                f"semantic search."
             )
     return 0
 

@@ -2,6 +2,77 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.5.5 — 2026-04-25
+
+Surface-honesty hotfix for [issue #16](https://github.com/LearnedGeek/claude-recall/issues/16).
+ANI's diagnostic surfaced a longstanding architectural quirk: routine
+re-indexing of session JSONLs cascades through the foreign key on
+`message_vectors.msg_id`, silently wiping vectors anytime a session
+file's mtime changes (which happens whenever a new turn is appended).
+The vectors come back the next time `claude-recall embed` runs, but
+between cascade and re-embed the tool was reporting `embeddings_ready:
+True` while semantic search returned "no vectors in index" — two reads
+of the same DB giving contradictory answers.
+
+This release ships the **honest-status surface fix only**. The
+underlying cascade-then-re-embed dance is architectural and will be
+addressed in v0.6 with a content-hash-aware indexer that doesn't wipe
+vectors on routine re-ingest. For now: status no longer lies, and the
+user gets a clear pointer at the right command to run.
+
+### Migration
+
+If you upgraded from an older v0.5.x and your `status` reports a
+coverage gap, run:
+
+```
+claude-recall embed
+```
+
+This re-embeds messages that have no vector (i.e., the ones the
+indexer's CASCADE wiped during routine re-ingest). On a 25,000-message
+archive this takes ~4 minutes against a warm Ollama. Re-running
+`claude-recall init-hooks --force` (the v0.5.4 migration step) is
+**not** required for this issue — `init-hooks` doesn't touch the
+index DB.
+
+### Fixed
+
+- **`embeddings_ready` now requires ≥95% vector coverage**, not just
+  `vectors_indexed > 0`. Reporting "ready" at 16% coverage was
+  silently deceptive — search returned "no vectors" because the
+  surviving vectors didn't intersect the FTS5 candidate pool, while
+  status said everything was fine. The 5% slack absorbs in-flight
+  index-vs-embed races without masking the real orphan-after-cascade
+  case.
+- **`status` text format prints a `vectors_coverage` percentage**
+  alongside the existing counts, and prints a prominent
+  `vectors are stale: ...` block when coverage drops below the
+  threshold — mirroring the existing `hooks are stale` warning.
+- **`status --format agent-context` now reports coverage percentage**
+  in its degraded-state line, so the SessionStart hook bubbles the
+  diagnostic up to the active Claude instance instead of silently
+  injecting an "embeddings ready" lie.
+
+### Added
+
+- `vectors_coverage` field in `status --format json` output (ratio
+  in `[0, 1]`, rounded to 4 decimal places). Programmatic consumers
+  can branch on this directly.
+
+### Known limitations (deferred to v0.6)
+
+- The cascade-on-re-ingest mechanism itself is not addressed in this
+  release. Until v0.6 ships, users should expect to run
+  `claude-recall embed` periodically (or after any extended
+  Claude Code activity that doesn't end with an explicit re-embed)
+  to keep coverage high. The v0.5.5 status output now makes that
+  visible instead of hiding it behind a lying `embeddings_ready`.
+- A scheduled `embed` is the simplest workaround if you don't want
+  to monitor manually. e.g., `claude-recall embed` after each
+  major Claude session, or as a cron job on systems where claude-recall
+  is wired into multiple projects.
+
 ## v0.5.4 — 2026-04-25
 
 Critical hook-shape fix for [issue #15](https://github.com/LearnedGeek/claude-recall/issues/15).

@@ -1221,6 +1221,127 @@ def test_status_json_includes_embedding_fields(tmp_path, capsys, monkeypatch):
     assert payload["vectors_indexed"] > 0
     assert payload["messages_without_vectors"] == 0
     assert payload["checks"]["embeddings_ready"] is True
+    # Issue #16: vectors_coverage exposed as a programmatic field for
+    # consumers who want to branch on coverage without re-deriving the math.
+    assert payload["vectors_coverage"] == 1.0
+
+
+def test_status_embeddings_ready_false_when_coverage_below_threshold(
+    tmp_path, capsys, monkeypatch
+):
+    """Issue #16 regression: vectors_indexed > 0 alone is not enough to
+    report embeddings_ready=True. Coverage must be ≥95%. ANI's repro had
+    4,177 vectors against ~26k messages — 16% coverage — and status was
+    reporting `embeddings_ready: True` while semantic search returned
+    "no vectors in index" because the surviving vectors didn't intersect
+    the FTS5 candidate pool. Test simulates the same shape: index + embed
+    fully, then delete most vectors to mimic the FK CASCADE on routine
+    re-ingest.
+    """
+    import sqlite3
+    archive_root = _seed_archive(tmp_path)
+    db_path = tmp_path / "index.db"
+    cfg = _enable_embeddings_cfg(tmp_path, archive_root, db_path)
+    _use_fake_ollama(monkeypatch, _FakeOllama())
+
+    cli.main(["--config", str(cfg), "index"])
+    capsys.readouterr()
+    cli.main(["--config", str(cfg), "embed"])
+    capsys.readouterr()
+
+    # Sanity-check the test setup: full coverage right after embed.
+    cli.main(["--config", str(cfg), "status", "--format", "json"])
+    full = json.loads(capsys.readouterr().out)
+    assert full["checks"]["embeddings_ready"] is True
+    assert full["vectors_coverage"] == 1.0
+
+    # Simulate the FK CASCADE wipe by deleting all but one vector. That
+    # leaves vectors_indexed > 0 (the v0.5.4 condition) but coverage way
+    # below the 95% threshold (the new v0.5.5 condition).
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "DELETE FROM message_vectors WHERE msg_id NOT IN ("
+        "  SELECT msg_id FROM message_vectors LIMIT 1)"
+    )
+    conn.commit()
+    conn.close()
+
+    cli.main(["--config", str(cfg), "status", "--format", "json"])
+    degraded = json.loads(capsys.readouterr().out)
+
+    assert degraded["vectors_indexed"] > 0  # the lenient v0.5.4 check
+    assert degraded["vectors_coverage"] < 0.95
+    assert degraded["checks"]["embeddings_ready"] is False, (
+        "embeddings_ready should be False when coverage < 95% — "
+        "v0.5.4's `vectors_indexed > 0` was the lying surface"
+    )
+
+
+def test_status_text_format_warns_when_vectors_stale(
+    tmp_path, capsys, monkeypatch
+):
+    """Issue #16: text-format status must print a prominent
+    `vectors are stale` block (mirroring the existing `hooks are stale`
+    block) when coverage drops below threshold, so users discover the
+    fix path without filing an issue first.
+    """
+    import sqlite3
+    archive_root = _seed_archive(tmp_path)
+    db_path = tmp_path / "index.db"
+    cfg = _enable_embeddings_cfg(tmp_path, archive_root, db_path)
+    _use_fake_ollama(monkeypatch, _FakeOllama())
+
+    cli.main(["--config", str(cfg), "index"])
+    capsys.readouterr()
+    cli.main(["--config", str(cfg), "embed"])
+    capsys.readouterr()
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "DELETE FROM message_vectors WHERE msg_id NOT IN ("
+        "  SELECT msg_id FROM message_vectors LIMIT 1)"
+    )
+    conn.commit()
+    conn.close()
+
+    cli.main(["--config", str(cfg), "status"])
+    out = capsys.readouterr().out
+    assert "vectors_coverage:" in out
+    assert "vectors are stale:" in out
+    assert "claude-recall embed" in out
+
+
+def test_status_agent_context_reports_coverage_pct_when_degraded(
+    tmp_path, capsys, monkeypatch
+):
+    """Issue #16: agent-context format (the SessionStart hook output) must
+    surface coverage percentage when degraded, so the active Claude
+    instance gets an honest signal instead of a silently-injected
+    "embeddings ready" lie.
+    """
+    import sqlite3
+    archive_root = _seed_archive(tmp_path)
+    db_path = tmp_path / "index.db"
+    cfg = _enable_embeddings_cfg(tmp_path, archive_root, db_path)
+    _use_fake_ollama(monkeypatch, _FakeOllama())
+
+    cli.main(["--config", str(cfg), "index"])
+    capsys.readouterr()
+    cli.main(["--config", str(cfg), "embed"])
+    capsys.readouterr()
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "DELETE FROM message_vectors WHERE msg_id NOT IN ("
+        "  SELECT msg_id FROM message_vectors LIMIT 1)"
+    )
+    conn.commit()
+    conn.close()
+
+    cli.main(["--config", str(cfg), "status", "--format", "agent-context"])
+    out = capsys.readouterr().out
+    assert "% coverage" in out
+    assert "claude-recall embed" in out
 
 
 def test_status_agent_context_reports_embedding_health(tmp_path, capsys, monkeypatch):
