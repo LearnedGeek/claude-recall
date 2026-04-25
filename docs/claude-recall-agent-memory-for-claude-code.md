@@ -64,6 +64,14 @@ What I'd specifically appreciate testing from early adopters:
 
 Every agentic coding tool writes structured session data somewhere, and none of them have a native mechanism yet for the agent to read its own prior work. That gap is getting filled tool by tool. The Microsoft post is the Copilot CLI instance. `claude-recall` is the Claude Code instance. Whichever agent you use, the shape is the same: find the archive, index it cheaply, wire a hook, stop re-explaining.
 
+The list is growing. As of the week this post goes up, there are at least three tools in the wild taking adjacent slices of this gap in genuinely different ways:
+
+- **[claude-memory-mcp](https://pypi.org/project/claude-memory-mcp/)** takes the curated route — explicit `remember` / `forget` calls via MCP, knowledge graph with typed edges, a separate write-store. Best fit when you want to deliberately structure the facts the agent should hold onto.
+- **[Beads](https://www.beads.dev)** treats it as task-tracking — Jira-shaped agent-readable state the agent consumes as part of doing work. Best fit when the durable artifact is what's *to do* rather than what's been *said*.
+- **claude-recall** is read-only over what Claude Code already writes — passive hook injection, no curation, no separate store. Best fit when you want prior reasoning surfaced automatically without remembering to save it.
+
+Three different theories of what "memory" means for an AI agent. Plenty of room for all three to coexist in someone's workflow.
+
 It's also a small demonstration of something I keep running into across projects: when you deploy a system for long enough, the interesting problems show up in the seams. ANI taught me that [memory isn't just storage, it's an amplifier](/Blog/Post/park-et-al-generative-agents-memory). claude-recall is what happens when the same observation comes at me from the other direction — when the *agent I'm using* needs memory, not the agent I'm building.
 
 ---
