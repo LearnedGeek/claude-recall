@@ -23,6 +23,13 @@ from pathlib import Path
 from . import __version__, indexer, projects, search, storage
 from .config import Config, load_config
 
+# Issue #16: vectors_coverage below this threshold trips the "vectors are
+# stale" warning surfaces (status text + agent-context + init-hooks). Module-
+# level so init-hooks and status share the same definition. The 5% slack
+# absorbs in-flight index-vs-embed races without masking real orphan-after-
+# cascade situations.
+EMBED_COVERAGE_THRESHOLD = 0.95
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -532,7 +539,6 @@ def _cmd_status(args: argparse.Namespace, cfg: Config) -> int:
         vectors_coverage = vectors_indexed / total_messages
     else:
         vectors_coverage = 1.0
-    EMBED_COVERAGE_THRESHOLD = 0.95
     embeddings_ready = (
         embeddings_enabled
         and ollama_reachable
@@ -1234,6 +1240,22 @@ def _cmd_init_hooks(args: argparse.Namespace, cfg: Config) -> int:
             "section of your config.toml (see INTEGRATION-GUIDE §9 "
             "\"How do I turn on embeddings?\")."
         )
+
+    # Issue #16 (DC suggestion): mirror status's stale-vectors warning here
+    # so a user who upgrades and re-runs init-hooks discovers the embed step
+    # without having to consult status separately. Auto-running embed
+    # itself isn't safe — it's multi-minute work users wouldn't expect from
+    # init-hooks — but the diagnostic surface is free.
+    if cfg.embeddings.enabled and has_index:
+        coverage = _compute_vectors_coverage(cfg.db_path)
+        if coverage is not None and coverage < EMBED_COVERAGE_THRESHOLD:
+            print(
+                f"\nclaude-recall: vectors_coverage is {coverage:.1%} "
+                f"(below {int(EMBED_COVERAGE_THRESHOLD * 100)}% threshold). "
+                f"Run `claude-recall embed` to restore semantic search.",
+                file=sys.stderr,
+            )
+
     return 0
 
 
@@ -1260,6 +1282,45 @@ def _db_has_any_sessions(db_path: Path) -> bool:
             conn.close()
     except sqlite3.Error:
         return False
+
+
+def _compute_vectors_coverage(db_path: Path) -> float | None:
+    """Return vectors_indexed / total_messages, or None if unreadable.
+
+    Issue #16 (v0.6): shared between `status` and `init-hooks` so both surface
+    the same coverage signal. Read-only connection; fails closed so a missing
+    or corrupt DB never crashes the caller. Empty archive returns 1.0 (no
+    messages means no orphaned vectors — don't fire the stale-vectors
+    warning during a first-install nudge).
+    """
+    if not db_path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master "
+                "WHERE type='table' AND name='messages'"
+            ).fetchone()
+            if not row or row[0] == 0:
+                return None
+            total = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+            if total == 0:
+                return 1.0
+            row = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master "
+                "WHERE type='table' AND name='message_vectors'"
+            ).fetchone()
+            if not row or row[0] == 0:
+                return None
+            vectors = conn.execute(
+                "SELECT COUNT(*) FROM message_vectors"
+            ).fetchone()[0]
+            return vectors / total
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
 
 
 def _scaffold_config_template() -> Path | None:

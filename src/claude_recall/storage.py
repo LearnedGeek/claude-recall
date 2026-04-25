@@ -14,12 +14,26 @@ Does NOT own:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sqlite3
 import sys
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+
+def content_hash(content: str) -> str:
+    """Stable per-message content fingerprint.
+
+    Used by the v0.6 indexer to detect which messages in a session have
+    actually changed across re-ingest, so the FK CASCADE on `message_vectors`
+    only fires for messages whose content moved (issue #16). blake2b is
+    stdlib + fast (~1µs/message); 16-byte digest is overkill-strong against
+    accidental collisions across realistic corpus sizes.
+    """
+    return hashlib.blake2b(content.encode("utf-8"), digest_size=16).hexdigest()
+
 
 SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -43,6 +57,7 @@ CREATE TABLE IF NOT EXISTS messages (
     content         TEXT NOT NULL,
     turn_index      INTEGER NOT NULL,
     timestamp       TEXT,
+    content_hash    TEXT,
     FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
 );
 
@@ -112,6 +127,12 @@ def open_db(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # WAL mode lets concurrent readers (e.g., a status query) proceed while
+    # an indexer writer holds the BEGIN IMMEDIATE lock. Required for v0.6's
+    # transaction-safe per-file diff (a SessionStart hook firing during a
+    # manual `index` run otherwise blocks both processes). PRAGMA persists
+    # in the database file itself; safe to set on every open.
+    conn.execute("PRAGMA journal_mode = WAL")
 
     if not fts5_available(conn):
         conn.close()
@@ -148,14 +169,57 @@ def fts5_available(conn: sqlite3.Connection) -> bool:
 
 
 def _install_schema(conn: sqlite3.Connection) -> None:
-    """Install DDL and record current schema version.
+    """Install DDL, run any pending migrations, record current schema version.
 
-    This is the MVP migration primitive. Future versions add conditional
-    ALTER TABLE steps here, gated on the current schema_version value.
+    Order matters:
+    1. SCHEMA_DDL is idempotent (CREATE IF NOT EXISTS) — adds tables for
+       fresh installs but cannot add columns to existing tables. That's
+       what the migration dispatcher below is for.
+    2. Migrations gated on the current `schema_version` value run AFTER
+       DDL so a fresh install (which sees v0 — schema_version table empty
+       after DDL but before version-stamping) skips the migration entirely
+       (the new column is already in SCHEMA_DDL).
+    3. Version-stamp last, so a partial migration leaves the version
+       behind and the next open retries.
     """
     conn.executescript(SCHEMA_DDL)
+
+    row = conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
+    current = row["v"] if row and row["v"] is not None else 0
+
+    if current < 2:
+        _migrate_v1_to_v2(conn)
+
     conn.execute(
         "INSERT OR IGNORE INTO schema_version(version) VALUES (?)",
         (SCHEMA_VERSION,),
     )
     conn.commit()
+
+
+def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
+    """Add `messages.content_hash` and backfill from existing content.
+
+    Issue #16 (v0.6): the indexer needs a per-message change detector so
+    routine re-ingest stops cascade-deleting unchanged vectors. This
+    migration is non-destructive — the backfill computes hashes from the
+    same `content` column the parser already ingested, so existing
+    (msg_id, vector) pairs stay valid and no re-embed is required.
+
+    The ALTER TABLE has no `IF NOT EXISTS` form in SQLite, so we
+    introspect via `PRAGMA table_info` and skip if the column already
+    exists. That makes the migration safe to re-run if a partial commit
+    left the schema in a half-state.
+    """
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(messages)").fetchall()]
+    if "content_hash" not in cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN content_hash TEXT")
+
+    rows = conn.execute(
+        "SELECT msg_id, content FROM messages WHERE content_hash IS NULL"
+    ).fetchall()
+    if rows:
+        conn.executemany(
+            "UPDATE messages SET content_hash = ? WHERE msg_id = ?",
+            [(content_hash(r["content"]), r["msg_id"]) for r in rows],
+        )

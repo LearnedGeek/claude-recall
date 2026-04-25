@@ -2,6 +2,107 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.6.0 — 2026-04-25
+
+Architectural fix for [issue #16](https://github.com/LearnedGeek/claude-recall/issues/16):
+the indexer no longer cascade-wipes vectors on routine re-ingest. v0.5.5
+made the orphan situation visible (honest `embeddings_ready`, prominent
+"vectors are stale" warnings); v0.6 makes it stop happening. The schema
+migrates non-destructively — existing vectors are preserved across the
+upgrade.
+
+### Migration
+
+```
+pip install --upgrade claude-recall
+```
+
+That's it. The schema migration runs automatically on the next `open_db()`
+call (which happens implicitly the first time you run any claude-recall
+command after upgrading). It adds a `content_hash` column to `messages`
+and backfills it from existing content, so all your existing
+`(msg_id, vector)` pairs stay valid. **No re-embed required.** No data
+loss. The first re-index after upgrade still incurs a one-time write
+(populating hashes for the new column), but vectors are not touched.
+
+### Fixed
+
+- **Indexer hot path no longer cascade-deletes vectors on routine
+  re-ingest.** The DELETE-then-INSERT pattern at the heart of `_index_file`
+  has been replaced with a content-hash diff: only messages whose hash
+  actually differs from the stored hash get DELETEd, so the FK CASCADE
+  on `message_vectors.msg_id` only fires for messages that genuinely
+  changed. Compaction events (where Claude Code rewrites the early lines
+  of a session JSONL with a summary turn) correctly delete the vectors
+  for the compacted-away turns and leave the unchanged tail intact.
+  Append-only sessions (the common case) leave all existing vectors in
+  place and only insert new rows for the appended turns.
+- **`mtime` change without content change is correctly identified as a
+  no-op.** Previously, any mtime touch (atomic-write rewrite, `touch(1)`,
+  backup-restore clock skew) forced a full session re-ingest with cascade
+  vector loss. Now the hash diff sees no changes and reports the session
+  as `unchanged`, with only `sessions.file_mtime` updated so the fast path
+  engages on subsequent runs.
+- **Concurrent indexer runs no longer race.** A SessionStart hook firing
+  in parallel with a manual `claude-recall index` previously could
+  double-insert messages. v0.6 wraps the per-file diff+update in a
+  `BEGIN IMMEDIATE` transaction so the read-then-write is atomic.
+- **WAL mode is now enabled** on the index DB, so concurrent readers
+  (e.g., a `status` query during an indexer run) don't block on the
+  writer's lock.
+
+### Added
+
+- **`messages.content_hash` column** (blake2b, 16-byte digest) — the
+  per-message change detector that powers the hash-diff path. Backfilled
+  during the v1→v2 migration from existing content.
+- **`IndexReport.incremental_sessions`** field — sessions that took the
+  hash-diff path and produced a non-empty delta. Distinguishes from
+  `updated_sessions` (full re-ingest, fires only on first index or
+  `--rebuild`) and `unchanged_sessions` (no content delta). CLI summary
+  output now reports this when verbose.
+- **`init-hooks` stale-vector warning** — mirrors the v0.5.5 status warning
+  so a user who upgrades and re-runs `init-hooks` discovers the embed step
+  without consulting `status` separately. Auto-running embed itself is
+  not enabled — multi-minute work users wouldn't expect from
+  `init-hooks` — but the diagnostic surface is free.
+- **Schema migration infrastructure.** `_install_schema` now runs DDL,
+  detects current version, runs any pending migrations, then version-stamps
+  last (so a partial migration leaves the version behind and the next
+  open retries). The v1→v2 migration is the first user.
+
+### Tests
+
+- 10 new regression tests in `tests/test_indexer.py`, including the
+  compaction-event repro that drove the choice of content-hash diff over
+  append-only line counting:
+  - `test_append_only_normal_case_preserves_existing_vectors`
+  - `test_compaction_event_replaces_prefix_preserves_tail`
+  - `test_edit_mid_stream_re_embeds_only_affected_turn`
+  - `test_mtime_jitter_without_content_change_is_noop`
+  - `test_malformed_line_does_not_break_session_in_v06`
+  - `test_session_file_deleted_orphan_vectors_cleaned_up`
+  - `test_v1_to_v2_migration_preserves_vectors`
+  - `test_concurrent_index_runs_do_not_double_insert`
+  - `test_init_hooks_warns_when_coverage_below_threshold`
+  - `test_full_lifecycle_index_embed_append_index_preserves_coverage`
+- Existing `test_changed_file_triggers_reindex` updated to reflect the
+  v0.6 contract (mtime touch without content change → `unchanged_sessions`).
+
+### Known limitations
+
+- **Compaction mechanism still empirically unconfirmed.** DC's correction
+  that JSONL is mid-stream-editable (rather than strictly append-only)
+  is the load-bearing assumption that drove the choice of content-hash
+  diff. The diff handles all three plausible compaction shapes
+  correctly (rewrite-in-place, append-marker, new-session-id), so the
+  uncertainty is academic — but worth flagging for future readers.
+- **Session deletion sweep is not in v0.6.** If a session JSONL is removed
+  from disk, the corresponding session row (and its vectors) stays in
+  the DB until next `--rebuild`. Low-priority follow-up; not load-bearing
+  for the search results since deleted sessions just stop matching the
+  archive walk.
+
 ## v0.5.5 — 2026-04-25
 
 Surface-honesty hotfix for [issue #16](https://github.com/LearnedGeek/claude-recall/issues/16).

@@ -175,7 +175,7 @@ def test_status_json(cli_env):
     assert code == 0
     payload = json.loads(out)
     assert payload["total_sessions"] == 3
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["checks"]["archive_accessible"] is True
     assert payload["checks"]["db_accessible"] is True
     assert payload["checks"]["fts_available"] is True
@@ -980,6 +980,78 @@ def test_init_hooks_idempotent(tmp_path):
     )
     assert len(settings["hooks"]["SessionStart"]) == 1
     assert len(settings["hooks"]["UserPromptSubmit"]) == 1
+
+
+def test_init_hooks_warns_when_coverage_below_threshold(
+    tmp_path, capsys, monkeypatch
+):
+    """Issue #16 (DC suggestion): init-hooks must surface the same
+    `vectors are stale` warning that v0.5.5's `status` does, so a user who
+    upgrades and re-runs init-hooks discovers the embed step without
+    consulting status separately. Auto-running embed itself is not
+    enabled (multi-minute work users wouldn't expect from init-hooks),
+    but the diagnostic surface is free.
+    """
+    import sqlite3 as _sqlite3
+    archive_root = _seed_archive(tmp_path)
+    db_path = tmp_path / "index.db"
+    cfg = _enable_embeddings_cfg(tmp_path, archive_root, db_path)
+    _use_fake_ollama(monkeypatch, _FakeOllama())
+
+    cli.main(["--config", str(cfg), "index"])
+    capsys.readouterr()
+    cli.main(["--config", str(cfg), "embed"])
+    capsys.readouterr()
+
+    # Simulate the FK-CASCADE wipe by deleting most vectors.
+    conn = _sqlite3.connect(db_path)
+    conn.execute(
+        "DELETE FROM message_vectors WHERE msg_id NOT IN ("
+        "  SELECT msg_id FROM message_vectors LIMIT 1)"
+    )
+    conn.commit()
+    conn.close()
+
+    # Now run init-hooks — it should print the stale-vectors warning.
+    project_root = tmp_path / "proj_for_initrun"
+    project_root.mkdir()
+    code = cli.main([
+        "--config", str(cfg),
+        "init-hooks", "--project-root", str(project_root),
+    ])
+    assert code == 0
+    err = capsys.readouterr().err
+    assert "vectors_coverage" in err
+    assert "claude-recall embed" in err
+
+
+def test_init_hooks_no_warning_when_coverage_full(
+    tmp_path, capsys, monkeypatch
+):
+    """Negative: full coverage should NOT print the warning. Without this
+    guard the warning would fire on every init-hooks run, training users
+    to ignore it (the boy-who-cried-wolf pattern).
+    """
+    archive_root = _seed_archive(tmp_path)
+    db_path = tmp_path / "index.db"
+    cfg = _enable_embeddings_cfg(tmp_path, archive_root, db_path)
+    _use_fake_ollama(monkeypatch, _FakeOllama())
+
+    cli.main(["--config", str(cfg), "index"])
+    capsys.readouterr()
+    cli.main(["--config", str(cfg), "embed"])
+    capsys.readouterr()
+
+    project_root = tmp_path / "proj_for_initrun"
+    project_root.mkdir()
+    code = cli.main([
+        "--config", str(cfg),
+        "init-hooks", "--project-root", str(project_root),
+    ])
+    assert code == 0
+    err = capsys.readouterr().err
+    assert "vectors are stale" not in err
+    assert "vectors_coverage" not in err
 
 
 def test_init_hooks_emits_schema_correct_nested_shape(tmp_path):

@@ -6,7 +6,8 @@ Responsibilities:
 - Parse each line defensively (skip malformed, log count)
 - Extract (role, content, timestamp) from each message
 - Flatten content blocks (skip tool_use / tool_result unless config opts in)
-- Upsert sessions, replace messages for changed sessions
+- Diff parsed messages against stored content_hash to surgically update
+  changed messages without cascade-wiping unchanged vectors (issue #16)
 
 See docs/PLAN.md section 5 (data model) and section 10 (implementation order).
 """
@@ -21,6 +22,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .storage import content_hash
+
 
 @dataclass
 class IndexReport:
@@ -29,6 +32,7 @@ class IndexReport:
     new_sessions: int = 0
     updated_sessions: int = 0
     unchanged_sessions: int = 0
+    incremental_sessions: int = 0
     total_messages: int = 0
     malformed_lines: int = 0
     elapsed_seconds: float = 0.0
@@ -111,57 +115,155 @@ def _index_file(
             print(f"[indexer] stat failed: {abs_path}: {exc}", file=sys.stderr)
         return
 
-    existing = conn.execute(
+    # Fast path: mtime unchanged means content unchanged (filesystem-level
+    # invariant); skip without acquiring a write lock or parsing the file.
+    existing_meta = conn.execute(
         "SELECT session_id, file_mtime FROM sessions WHERE file_path = ?",
         (abs_path,),
     ).fetchone()
-
-    if existing and not rebuild and existing["file_mtime"] == mtime:
+    if existing_meta and not rebuild and existing_meta["file_mtime"] == mtime:
         report.unchanged_sessions += 1
         return
 
-    messages, malformed, first_ts, last_ts = _parse_session_file(
-        file_path, index_tool_blocks=index_tool_blocks
-    )
-    report.malformed_lines += malformed
+    # Real work path. Acquire a write lock now so the read-then-write below
+    # is atomic against a concurrent indexer (issue #16: SessionStart hook
+    # firing in parallel with a manual `index` run otherwise produces
+    # duplicate messages on race). Joining an outer transaction (e.g., from
+    # run_index's rebuild DELETE) is safe — we just don't manage commit/
+    # rollback in that case; the caller does.
+    own_txn = not conn.in_transaction
+    if own_txn:
+        conn.execute("BEGIN IMMEDIATE")
 
-    session_id = file_path.stem
-    now_iso = datetime.now(UTC).isoformat()
-
-    # Delete any prior session row for this file (cascades to messages).
-    conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
-
-    conn.execute(
-        "INSERT INTO sessions(session_id, project_slug, file_path, file_mtime, "
-        "started_at, ended_at, turn_count, indexed_at) VALUES (?,?,?,?,?,?,?,?)",
-        (
-            session_id,
-            project_slug,
-            abs_path,
-            mtime,
-            first_ts,
-            last_ts,
-            len(messages),
-            now_iso,
-        ),
-    )
-
-    if messages:
-        conn.executemany(
-            "INSERT INTO messages(session_id, role, content, turn_index, timestamp) "
-            "VALUES (?,?,?,?,?)",
-            [
-                (session_id, m["role"], m["content"], m["turn_index"], m["timestamp"])
-                for m in messages
-            ],
+    try:
+        messages, malformed, first_ts, last_ts = _parse_session_file(
+            file_path, index_tool_blocks=index_tool_blocks
         )
-    conn.commit()
+        report.malformed_lines += malformed
+        new_hashes = [content_hash(m["content"]) for m in messages]
 
-    if existing:
-        report.updated_sessions += 1
-    else:
-        report.new_sessions += 1
-    report.total_messages += len(messages)
+        session_id = file_path.stem
+        now_iso = datetime.now(UTC).isoformat()
+
+        existing = conn.execute(
+            "SELECT session_id, file_mtime FROM sessions WHERE file_path = ?",
+            (abs_path,),
+        ).fetchone()
+
+        if existing and not rebuild:
+            # Hash-diff against the stored messages. Only DELETE rows whose
+            # content actually changed (or fell out of range), so vectors
+            # for untouched messages survive via the FK CASCADE NOT firing.
+            old_rows = conn.execute(
+                "SELECT msg_id, turn_index, content_hash FROM messages "
+                "WHERE session_id = ? ORDER BY turn_index",
+                (session_id,),
+            ).fetchall()
+
+            to_delete: list[int] = []
+            surviving_indices: set[int] = set()
+            for old in old_rows:
+                idx = old["turn_index"]
+                if idx >= len(messages):
+                    # Truncation or compaction shrunk the file past this index.
+                    to_delete.append(old["msg_id"])
+                elif old["content_hash"] != new_hashes[idx]:
+                    # Content at this turn_index changed — typical compaction
+                    # signature for early indices, or a mid-stream edit.
+                    to_delete.append(old["msg_id"])
+                else:
+                    surviving_indices.add(idx)
+
+            if to_delete:
+                placeholders = ",".join("?" * len(to_delete))
+                conn.execute(
+                    f"DELETE FROM messages WHERE msg_id IN ({placeholders})",
+                    to_delete,
+                )
+
+            new_inserts = [
+                (
+                    session_id,
+                    m["role"],
+                    m["content"],
+                    idx,
+                    m["timestamp"],
+                    new_hashes[idx],
+                )
+                for idx, m in enumerate(messages)
+                if idx not in surviving_indices
+            ]
+            if new_inserts:
+                conn.executemany(
+                    "INSERT INTO messages(session_id, role, content, "
+                    "turn_index, timestamp, content_hash) "
+                    "VALUES (?,?,?,?,?,?)",
+                    new_inserts,
+                )
+
+            conn.execute(
+                "UPDATE sessions SET file_mtime=?, ended_at=?, "
+                "turn_count=?, indexed_at=? WHERE session_id=?",
+                (mtime, last_ts, len(messages), now_iso, session_id),
+            )
+
+            if not to_delete and not new_inserts:
+                # mtime touched but content actually unchanged (atomic-write
+                # rewrite, backup-restore clock skew, touch(1), etc.)
+                report.unchanged_sessions += 1
+            else:
+                report.incremental_sessions += 1
+                report.total_messages += len(new_inserts)
+        else:
+            # Full re-ingest path: first-time index OR --rebuild.
+            conn.execute(
+                "DELETE FROM sessions WHERE session_id = ?", (session_id,)
+            )
+            conn.execute(
+                "INSERT INTO sessions(session_id, project_slug, file_path, "
+                "file_mtime, started_at, ended_at, turn_count, indexed_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    session_id,
+                    project_slug,
+                    abs_path,
+                    mtime,
+                    first_ts,
+                    last_ts,
+                    len(messages),
+                    now_iso,
+                ),
+            )
+            if messages:
+                conn.executemany(
+                    "INSERT INTO messages(session_id, role, content, "
+                    "turn_index, timestamp, content_hash) "
+                    "VALUES (?,?,?,?,?,?)",
+                    [
+                        (
+                            session_id,
+                            m["role"],
+                            m["content"],
+                            m["turn_index"],
+                            m["timestamp"],
+                            new_hashes[idx],
+                        )
+                        for idx, m in enumerate(messages)
+                    ],
+                )
+
+            if existing:
+                report.updated_sessions += 1
+            else:
+                report.new_sessions += 1
+            report.total_messages += len(messages)
+
+        if own_txn:
+            conn.commit()
+    except Exception:
+        if own_txn:
+            conn.rollback()
+        raise
 
     if verbose:
         print(
