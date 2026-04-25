@@ -48,7 +48,9 @@ There's a deeper principle under those three: the tool's job is to make the arch
 
 ## The honest caveats
 
-This is v0.5.3, tagged beta. It works on my machine daily against a 25,000-message archive. It also has bugs — twelve of them caught and closed in the dogfooding cycle, including one silent 27%-data-loss embedding bug that wouldn't have surfaced without real-world use. The v0.5 release landed on PyPI a few days ago, so the install story is now `pip install claude-recall` rather than a release-wheel URL.
+This is v0.5.4, tagged beta. It works on my machine daily against a 25,000-message archive. It also has bugs — thirteen of them caught and closed in the dogfooding cycle, including one silent 27%-data-loss embedding bug that wouldn't have surfaced without real-world use. The v0.5 release landed on PyPI a few days ago, so the install story is now `pip install claude-recall` rather than a release-wheel URL.
+
+A live example of what "actively maintained" looks like in this category: on the morning of April 25, the tool started failing in fresh installs. Claude Code v2.1.118, released two days earlier, had tightened its hook-schema validator and stopped accepting the legacy flat shape claude-recall had been generating since v0.4. The diagnosis came from running claude-recall against its own repo — which is also how the paper trail got captured — and v0.5.4 shipped the same morning, with a CHANGELOG entry citing the upstream release that triggered it. Memory tools live downstream of the agents they instrument, and the agents change. The healthy pattern is to assume that and build a tight loop, not to assume stability.
 
 It isn't semantic-search-of-everything. It isn't a replacement for CLAUDE.md or for the `memory/` auto-memory system Claude Code ships natively. It isn't cross-machine — your session archive is local, the index stays local. That's a feature for me, since the archive has personal data in it; it may be a limitation if you need shared recall across teammates.
 
