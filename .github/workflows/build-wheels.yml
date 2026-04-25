@@ -126,6 +126,22 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist/
+      - name: Ensure GitHub Release exists
+        # `gh release upload` requires the release to already exist. Earlier
+        # tag pushes failed here because I'd forgotten to `gh release create`
+        # before tagging. Create-if-missing makes the workflow self-sufficient.
+        # The release-create body is intentionally minimal — owners can
+        # edit the release notes after the fact via the GitHub UI.
+        run: |
+          if ! gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create "${{ github.ref_name }}" \
+              --repo "${{ github.repository }}" \
+              --title "${{ github.ref_name }}" \
+              --notes "Auto-created by build-wheels.yml. See CHANGELOG.md for details; edit these notes after the fact for additional context."
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Attach wheels to GitHub Release
         run: |
           ls -la dist/
