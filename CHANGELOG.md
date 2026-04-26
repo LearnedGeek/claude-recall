@@ -25,6 +25,16 @@ and backfills it from existing content, so all your existing
 loss. The first re-index after upgrade still incurs a one-time write
 (populating hashes for the new column), but vectors are not touched.
 
+> **Note:** if your `SessionStart` hook is wired (the default after
+> `init-hooks`), the hook calls `claude-recall status` on every Claude
+> Code session start, which opens the DB and triggers the migration
+> immediately. So users who want to capture true pre-migration state
+> via `claude-recall status --format json` should do so *before* opening
+> Claude Code in any project. By the time you can hand-run a `status`
+> command after upgrading, the hook has likely already run the migration
+> behind the scenes. Not a problem for verification (the migration is
+> non-destructive), but worth knowing.
+
 ### Fixed
 
 - **Indexer hot path no longer cascade-deletes vectors on routine
