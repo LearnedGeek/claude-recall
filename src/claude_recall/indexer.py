@@ -169,9 +169,27 @@ def _index_file(
     # duplicate messages on race). Joining an outer transaction (e.g., from
     # run_index's rebuild DELETE) is safe — we just don't manage commit/
     # rollback in that case; the caller does.
+    #
+    # Issue #20 (v0.6.2): retry BEGIN IMMEDIATE on transient lock errors.
+    # Connection-level busy_timeout is set at open_db time, but the
+    # Python sqlite3 module's wrapper can return "database is locked"
+    # immediately on BEGIN — the busy handler doesn't reliably engage
+    # for the BEGIN statement itself the way it does for DML. A
+    # wallclock-bounded retry loop bridges that gap deterministically
+    # regardless of attempt-count behavior.
     own_txn = not conn.in_transaction
     if own_txn:
-        conn.execute("BEGIN IMMEDIATE")
+        deadline = time.monotonic() + 30.0
+        while True:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                break
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower():
+                    raise
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.05)
 
     try:
         messages, malformed, first_ts, last_ts = _parse_session_file(

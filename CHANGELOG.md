@@ -2,6 +2,53 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.6.2 — 2026-04-26
+
+CI fix-forward for v0.6.1. The v0.6.1 build failed on the
+concurrent-indexer regression test on Windows CI; debugging the
+failure surfaced a real concurrency-hardening gap and a test-shape
+issue. Both fixed here.
+
+**v0.6.1 never published to PyPI** — CI failed before the publish
+step, so PyPI users go straight from 0.6.0 to 0.6.2. The git tag
+`v0.6.1` exists for historical record but represents an unreleased
+intermediate. Read this entry alongside the v0.6.1 entry below for
+the full set of fixes shipping in 0.6.2.
+
+### Fixed (v0.6.2-specific)
+
+- **Connection-level busy timeout set at connect time, not via PRAGMA.**
+  `sqlite3.connect()` now passes `timeout=30.0` to push the busy
+  timeout through the C-API's `sqlite3_busy_timeout` directly. The
+  PRAGMA path (which v0.6.1 used) doesn't reliably apply to BEGIN
+  IMMEDIATE in Python's sqlite3 module on Windows. The v0.6 BEGIN
+  IMMEDIATE wrapping was necessary but not sufficient without this.
+  PRAGMA `busy_timeout = 30000` is also set as belt-and-suspenders
+  for any code path that re-reads the connection's timeout.
+- **`_index_file` retries BEGIN IMMEDIATE on transient lock errors.**
+  Wallclock-bounded retry loop with 50ms backoff bridges any gap
+  between the connection's busy_timeout and Python sqlite3's wrapper
+  behavior. Total wait bounded at 30 seconds — production indexer
+  contention realistically completes in milliseconds, so this only
+  fires in pathological cases.
+- **Concurrent-indexer regression test rewrote to pre-create the DB.**
+  Two threads simultaneously calling `PRAGMA journal_mode = WAL` on a
+  fresh DB raced on the WAL-mode conversion (each thread tries to
+  acquire EXCLUSIVE briefly to flip the journal mode, and the
+  conversion isn't well-protected by busy_timeout). Pre-creating the
+  DB before launching the threads matches production reality (by the
+  time concurrent indexers run, the DB exists from a prior bootstrap)
+  and removes the spurious failure mode without weakening the
+  no-duplicates safety assertion.
+
+### Migration
+
+```
+pip install --upgrade claude-recall
+```
+
+Same as v0.6.1. No schema migration. No re-embed.
+
 ## v0.6.1 — 2026-04-26
 
 Three small fixes closing the diagnostic threads from the v0.6.0

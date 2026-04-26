@@ -124,7 +124,15 @@ def open_db(path: Path) -> sqlite3.Connection:
     is_new = not path.exists()
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(str(path))
+    # Issue #20 (v0.6.2): set the busy timeout at connect time, not via
+    # PRAGMA later. The PRAGMA path doesn't reliably apply to BEGIN
+    # IMMEDIATE in Python's sqlite3 module on Windows (CI repro from
+    # v0.6.1's concurrent-indexer test); the `timeout` argument to
+    # sqlite3.connect() goes through the C-API's sqlite3_busy_timeout
+    # at handle creation, which does. 30 seconds is safe headroom: any
+    # realistic per-file index work completes in milliseconds, and a
+    # genuinely-stuck process this long would surface other symptoms.
+    conn = sqlite3.connect(str(path), timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     # WAL mode lets concurrent readers (e.g., a status query) proceed while
@@ -133,6 +141,9 @@ def open_db(path: Path) -> sqlite3.Connection:
     # manual `index` run otherwise blocks both processes). PRAGMA persists
     # in the database file itself; safe to set on every open.
     conn.execute("PRAGMA journal_mode = WAL")
+    # Belt-and-suspenders: set the PRAGMA too so any code path that re-reads
+    # the connection's timeout sees the same value as the C-API.
+    conn.execute("PRAGMA busy_timeout = 30000")
 
     if not fts5_available(conn):
         conn.close()
