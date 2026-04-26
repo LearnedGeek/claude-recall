@@ -1023,6 +1023,104 @@ def test_init_hooks_idempotent(tmp_path):
     assert len(settings["hooks"]["UserPromptSubmit"]) == 1
 
 
+def test_init_hooks_force_preserves_user_added_sibling_commands(tmp_path):
+    """Issue #20: --force must not destroy user-added sibling commands
+    composed alongside the claude-recall hook within the same matcher
+    entry. Common pattern: a time-injection PowerShell hook placed next
+    to the claude-recall hook, both firing on UserPromptSubmit.
+
+    Pre-fix, --force did `hooks_block.pop(event)` which wiped the entire
+    matcher entry. v0.5.5+ actively prompts users to run init-hooks
+    --force via the stale-hook warning, which made the destruction both
+    silent and routine.
+    """
+    project_root = tmp_path / "proj"
+    (project_root / ".claude").mkdir(parents=True)
+
+    user_time_hook = (
+        "powershell -NoProfile -Command \"@{additionalContext = "
+        "'Current local time: ' + (Get-Date -Format 'dddd yyyy-MM-dd HH:mm zzz')} "
+        "| ConvertTo-Json -Compress\""
+    )
+    pre = {
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "hooks": [
+                        {"type": "command", "command": "/user/pre-tool-use.sh"},
+                    ],
+                },
+            ],
+            "UserPromptSubmit": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": user_time_hook,
+                            "shell": "powershell",
+                        },
+                        {
+                            "type": "command",
+                            "command": "/old/site-packages/claude-recall-hook.exe",
+                        },
+                    ],
+                },
+            ],
+            "SessionStart": [
+                {
+                    "matcher": "startup|resume",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "/user/wake_up.sh",
+                        },
+                        {
+                            "type": "command",
+                            "command": "/old/site-packages/session_start.ps1",
+                            "shell": "powershell",
+                        },
+                    ],
+                },
+            ],
+        }
+    }
+    settings_path = project_root / ".claude" / "settings.json"
+    settings_path.write_text(json.dumps(pre), encoding="utf-8")
+
+    code = cli.main(["init-hooks", "--project-root", str(project_root), "--force"])
+    assert code == 0
+
+    merged = json.loads(settings_path.read_text(encoding="utf-8"))
+
+    # Unmanaged events untouched verbatim.
+    assert merged["hooks"]["PreToolUse"] == pre["hooks"]["PreToolUse"]
+
+    # User's UserPromptSubmit time hook survived; user's SessionStart wake-up
+    # hook survived; old stale claude-recall paths gone; new claude-recall
+    # commands present at the current install path.
+    ups_cmds = _hook_commands(merged["hooks"]["UserPromptSubmit"])
+    assert any(user_time_hook in c for c in ups_cmds), (
+        f"user's time-injection hook was wiped by --force: {ups_cmds!r}"
+    )
+    assert all(
+        "site-packages" not in c for c in ups_cmds
+    ), f"stale site-packages claude-recall path survived: {ups_cmds!r}"
+    assert any(
+        "claude-recall-hook" in c or "on_prompt" in c for c in ups_cmds
+    ), f"current claude-recall command missing: {ups_cmds!r}"
+
+    ss_cmds = _hook_commands(merged["hooks"]["SessionStart"])
+    assert "/user/wake_up.sh" in ss_cmds, (
+        f"user's SessionStart wake-up hook was wiped: {ss_cmds!r}"
+    )
+    assert all(
+        "site-packages" not in c for c in ss_cmds
+    ), f"stale site-packages SessionStart path survived: {ss_cmds!r}"
+    assert any(
+        "session_start" in c for c in ss_cmds
+    ), f"current claude-recall SessionStart command missing: {ss_cmds!r}"
+
+
 def test_init_hooks_warns_when_coverage_below_threshold(
     tmp_path, capsys, monkeypatch
 ):

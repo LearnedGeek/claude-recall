@@ -2,6 +2,65 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.6.3 — 2026-04-26
+
+Hotfix for [issue #20](https://github.com/LearnedGeek/claude-recall/issues/20):
+`init-hooks --force` was silently destroying user-added sibling commands
+composed within the same managed event as the claude-recall hook.
+
+### The bug
+
+`--force` did `hooks_block.pop(event)` for the two events claude-recall
+manages (`SessionStart`, `UserPromptSubmit`), then re-merged just our
+own command back. Wiping the entire matcher entry destroyed any user
+commands sitting alongside ours in the same `hooks: [...]` array.
+
+This compounded with v0.5.5+ actively prompting users to run
+`init-hooks --force` whenever a stale-hook warning fired — making the
+destruction both silent and routine. DC's reproduction: composed a
+time-injection PowerShell hook alongside the claude-recall hook;
+upgraded 0.6.0 → 0.6.2 on the staleness prompt; ran `init-hooks
+--force`; time hook was gone.
+
+### The fix
+
+`--force` now surgically removes only claude-recall-owned commands
+within each managed event, leaving sibling commands intact. We
+identify our commands by filename fragment match (`claude-recall-hook`,
+`session_start.ps1`, `session_start.sh`, `on_prompt.ps1`,
+`on_prompt.sh`) so the heuristic survives install-path shifts across
+versions.
+
+If a matcher entry's `hooks: [...]` array becomes empty after stripping
+ours, the entry is dropped. If the event has no entries left after
+that, the event key is dropped. Net effect: users layering custom
+hooks alongside ours are now safe to run `init-hooks --force` whenever
+the stale-hook warning fires.
+
+### Migration
+
+```
+pip install --upgrade claude-recall
+```
+
+If you previously had user-added hooks within `UserPromptSubmit` or
+`SessionStart` that were lost to a prior `--force`, you'll need to
+re-add them by hand — v0.6.3 prevents the destruction going forward,
+but doesn't restore from history. The common pattern people are
+asking about (current-time injection) is a one-line PowerShell hook;
+see issue #20 for the snippet.
+
+### Tests
+
+- `test_init_hooks_force_preserves_user_added_sibling_commands`
+  ([tests/test_cli.py](https://github.com/LearnedGeek/claude-recall/blob/main/tests/test_cli.py)) —
+  pre-state has both a user-managed time-injection hook and a stale
+  claude-recall path within the same matcher entry. After `--force`,
+  the user hook survives, the stale path is gone, and the new
+  claude-recall path is present.
+
+175 tests pass (was 174; one new).
+
 ## v0.6.2 — 2026-04-26
 
 CI fix-forward for v0.6.1. The v0.6.1 build failed on the

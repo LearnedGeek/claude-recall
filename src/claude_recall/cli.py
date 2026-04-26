@@ -1212,13 +1212,16 @@ def _cmd_init_hooks(args: argparse.Namespace, cfg: Config) -> int:
 
     hooks_block = settings.setdefault("hooks", {})
 
-    # --force wipes the two events claude-recall manages before re-merging,
-    # so upgrades don't accumulate stale command entries pointing at old
-    # install paths (issue #4). Hook events we don't manage (PreToolUse,
-    # PostToolUse, etc.) are always preserved.
+    # --force surgically removes only claude-recall-owned commands within
+    # the managed events, then re-merges our updated commands. Issue #4
+    # required wiping prior claude-recall paths (so upgrades don't keep
+    # stale site-packages references); issue #20 reminded us that wiping
+    # the entire event also destroys user-added sibling commands composed
+    # alongside ours (e.g., a time-injection PowerShell hook). Strip
+    # ours only; keep the rest.
     if args.force:
         for event in ("SessionStart", "UserPromptSubmit"):
-            hooks_block.pop(event, None)
+            _strip_claude_recall_commands(hooks_block, event)
 
     if session_start_cmd is not None:
         _merge_hook(hooks_block, "SessionStart", session_start_cmd, matcher="startup|resume")
@@ -1395,6 +1398,73 @@ def _read_installed_hook_version(project_root: Path | None = None) -> str | None
         return stamp.read_text(encoding="utf-8").strip() or None
     except OSError:
         return None
+
+
+_CLAUDE_RECALL_OWNED_FRAGMENTS = (
+    "claude-recall-hook",  # v0.4+ NativeAOT binary (Windows .exe + future)
+    "session_start.ps1",   # SessionStart on Windows
+    "session_start.sh",    # SessionStart on POSIX
+    "on_prompt.ps1",       # v0.3 UserPromptSubmit fallback (Windows)
+    "on_prompt.sh",        # v0.3 UserPromptSubmit fallback (POSIX)
+)
+
+
+def _is_claude_recall_command(command: object) -> bool:
+    """Heuristic: is this command path one claude-recall placed?
+
+    We match by filename fragment rather than absolute path because
+    install paths shift across versions (site-packages → .claude/hooks/,
+    drive letters change, etc.). The fragment list covers every shape
+    init-hooks has ever emitted.
+    """
+    if not isinstance(command, str):
+        return False
+    return any(frag in command for frag in _CLAUDE_RECALL_OWNED_FRAGMENTS)
+
+
+def _strip_claude_recall_commands(hooks_block: dict, event: str) -> None:
+    """Remove claude-recall-owned commands from the event's entries while
+    preserving any sibling commands the user has composed alongside ours.
+
+    Issue #20: prior to this, `--force` did `hooks_block.pop(event)`, which
+    destroyed the entire matcher entry — including any user-added commands
+    like a time-injection PowerShell hook composed alongside the
+    claude-recall hook within the same `hooks: [...]` array. Since v0.5.5+
+    actively prompts users to run `init-hooks --force` on a stale-hook
+    warning, the destruction was both silent and routine.
+
+    The replacement: for each matcher entry under `event`, walk its inner
+    `hooks: [...]` array and drop only the entries `_is_claude_recall_command`
+    flags as ours. If an entry's inner array is empty after stripping,
+    drop the entry. If the event has no entries left, drop the event key.
+    """
+    entries = hooks_block.get(event)
+    if not isinstance(entries, list):
+        return
+
+    surviving: list[dict] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            surviving.append(entry)
+            continue
+        inner = entry.get("hooks")
+        if not isinstance(inner, list):
+            surviving.append(entry)
+            continue
+        new_inner = [
+            h for h in inner
+            if not (isinstance(h, dict) and _is_claude_recall_command(h.get("command")))
+        ]
+        if new_inner:
+            preserved = dict(entry)
+            preserved["hooks"] = new_inner
+            surviving.append(preserved)
+        # else: this entry's hooks array is empty after stripping ours; drop it.
+
+    if surviving:
+        hooks_block[event] = surviving
+    else:
+        hooks_block.pop(event, None)
 
 
 def _merge_hook(
