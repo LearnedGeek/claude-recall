@@ -4,13 +4,13 @@ Automatic, cheap, precise query of your Claude Code session archive — wired in
 
 > ### Status: beta
 >
-> **claude-recall is in daily production use on the maintainer's workflow against a 25,000-message session archive.** The API and hook contract are stable. Known issues are tracked in GitHub (see [Known Issues](#known-issues)).
+> **claude-recall is in daily production use against a 26,000+ message session archive across 21 projects.** The API and hook contract are stable through v0.6.0. Known issues are tracked in GitHub (see [Known Issues](#known-issues)).
 >
-> **Install via PyPI:** `pip install 'claude-recall[embeddings]'`. Beta = rough edges get filed, triaged, and shipped quickly (nine issues fixed across the dogfooding cycle so far — see the changelog).
+> **Install via PyPI:** `pip install 'claude-recall[embeddings]'`. Beta = rough edges get filed, triaged, and shipped quickly. Recent cadence: seventeen issues filed (fourteen closed) across April 21–26, with three same-day patch releases on April 25 alone (a Claude Code v2.1.118 hook-schema regression, an embeddings-coverage honesty fix, and a v0.6.0 architectural fix that stops routine indexing from wiping vectors). Full history in the [changelog](https://github.com/LearnedGeek/claude-recall/blob/main/CHANGELOG.md).
 >
 > Feedback welcome via GitHub issues. The tool handles single-user, single-machine session archives. Multi-user / shared-recall is explicitly out of scope for beta.
 
-**What's landed through v0.5.x:** MVP + keyword extraction + auto project scoping + config-driven hook flags + stale-hook detection + opt-in semantic retrieval via Ollama + NativeAOT C# hook binary + `init-hooks --force` overwrite semantics + PyPI publish. See [the original plan](https://github.com/LearnedGeek/claude-recall/blob/main/docs/PLAN.md), [feature plans](https://github.com/LearnedGeek/claude-recall/blob/main/docs/EMBEDDINGS-PLAN.md), and the [changelog](https://github.com/LearnedGeek/claude-recall/blob/main/CHANGELOG.md) for the full history.
+**What's landed through v0.6.x:** MVP + keyword extraction + auto project scoping + config-driven hook flags + stale-hook detection + opt-in semantic retrieval via Ollama + NativeAOT C# hook binary + `init-hooks --force` overwrite semantics + PyPI publish + honest embeddings-coverage reporting + content-hash-aware indexer (vectors no longer cascade-wipe on routine re-ingest). See [the original plan](https://github.com/LearnedGeek/claude-recall/blob/main/docs/PLAN.md), [feature plans](https://github.com/LearnedGeek/claude-recall/blob/main/docs/EMBEDDINGS-PLAN.md), and the [changelog](https://github.com/LearnedGeek/claude-recall/blob/main/CHANGELOG.md) for the full history.
 
 ---
 
@@ -132,6 +132,9 @@ Live list of issues caught in beta use. Filing new issues is explicitly welcome 
 
 - **Open issues:** see [github.com/LearnedGeek/claude-recall/issues](https://github.com/LearnedGeek/claude-recall/issues) for the current list.
 - **Recently closed (not a full changelog — see the [CHANGELOG](https://github.com/LearnedGeek/claude-recall/blob/main/CHANGELOG.md) for that):**
+  - [#16](https://github.com/LearnedGeek/claude-recall/issues/16) — Routine re-indexing was silently cascade-wiping embedding vectors via FK ON DELETE CASCADE; status reported `embeddings_ready: True` while search returned "no vectors in index" for the same DB. Fixed architecturally in v0.6.0 with content-hash-aware indexer + non-destructive schema migration that preserves existing vectors across the upgrade.
+  - [#15](https://github.com/LearnedGeek/claude-recall/issues/15) — Claude Code v2.1.118's strict-validation pass rejected the legacy flat hook shape claude-recall had been generating since v0.4, silently disabling all of the host project's settings as a side effect. Fixed in v0.5.4 with the schema-correct nested shape and `shell: "powershell"` for `.ps1` hooks on Windows.
+  - [#11](https://github.com/LearnedGeek/claude-recall/issues/11), [#12](https://github.com/LearnedGeek/claude-recall/issues/12) — Hook-latency claim on PyPI was true on small fixtures but wrong at 25k-message scale; binary `--version` was hardcoded constant rather than reading from the package. Both fixed in v0.5.2.
   - [#8](https://github.com/LearnedGeek/claude-recall/issues/8) — `embed` batches used to fail the whole 32-message batch when one input was oversized, silently dropping 27% of vectors. Fixed in v0.4.3 with per-input truncation, error-body surfacing, and per-message singleton fallback. Dogfooding validated 99.95% coverage on a 25k-message archive after the fix.
   - [#4](https://github.com/LearnedGeek/claude-recall/issues/4) — `init-hooks --force` merged with existing settings.json instead of overwriting, producing duplicate `UserPromptSubmit` entries when upgrading from a manual wiring. Fixed in v0.4.2.
   - [#3](https://github.com/LearnedGeek/claude-recall/issues/3) — `init-hooks --force` crashed on Windows native-binary wheels (missing shell-script sources in the wheel). Fixed in v0.4.1.
