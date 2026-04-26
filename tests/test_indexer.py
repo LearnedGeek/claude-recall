@@ -637,6 +637,80 @@ def test_concurrent_index_runs_do_not_double_insert(archive_dir, tmp_path):
         conn.close()
 
 
+def test_orphan_session_sweep_removes_deleted_files(archive_dir, db_conn):
+    """Issue #17: when a session JSONL is removed from disk, the next index
+    run sweeps the orphan session row. CASCADE handles messages + vectors.
+    DC's empirical 4-of-21 rate showed this happens routinely over time.
+    """
+    indexer.run_index(db_conn, archive_dir)
+    assert _session_count(db_conn) == 3
+    initial_msgs = _message_count(db_conn)
+    target_msgs = _message_count(db_conn, "session_short")
+    assert target_msgs == 5
+
+    # Seed a vector on one of the doomed messages — sweep should cascade it out.
+    _seed_dummy_vectors(db_conn, "session_short")
+    pre_vector_count = db_conn.execute(
+        "SELECT COUNT(*) FROM message_vectors"
+    ).fetchone()[0]
+    assert pre_vector_count == 5
+
+    target = archive_dir / "test-project" / "session_short.jsonl"
+    target.unlink()
+
+    report = indexer.run_index(db_conn, archive_dir)
+    assert report.deleted_sessions == 1
+    assert _session_count(db_conn) == 2
+    assert _message_count(db_conn) == initial_msgs - 5
+    assert _message_count(db_conn, "session_short") == 0
+    # CASCADE cleared the vectors too.
+    post_vector_count = db_conn.execute(
+        "SELECT COUNT(*) FROM message_vectors"
+    ).fetchone()[0]
+    assert post_vector_count == 0
+
+
+def test_orphan_sweep_scoped_to_walked_projects(archive_dir, db_conn):
+    """When `--project foo` is passed, the sweep only deletes orphans within
+    project foo — must not touch sessions in other projects whose files
+    happen to be missing.
+    """
+    indexer.run_index(db_conn, archive_dir)
+
+    # Add a second project, index it, then delete its file.
+    other = archive_dir / "other-project"
+    other.mkdir()
+    other_jsonl = other / "session_other.jsonl"
+    other_jsonl.write_text(
+        '{"type":"user","message":{"role":"user",'
+        '"content":"some other project content"},'
+        '"timestamp":"2026-04-21T00:00:00Z"}\n',
+        encoding="utf-8",
+    )
+    indexer.run_index(db_conn, archive_dir, project_slug="other-project")
+    assert _session_count(db_conn) == 4
+    other_jsonl.unlink()
+
+    # Also delete a test-project file. Sweep run scoped to test-project
+    # should only remove the test-project orphan.
+    (archive_dir / "test-project" / "session_short.jsonl").unlink()
+
+    report = indexer.run_index(
+        db_conn, archive_dir, project_slug="test-project"
+    )
+    assert report.deleted_sessions == 1, (
+        "scoped sweep should delete exactly the test-project orphan, not "
+        "the other-project one which is outside its scope"
+    )
+
+    # other-project's orphan still in DB.
+    other_count = db_conn.execute(
+        "SELECT COUNT(*) FROM sessions WHERE project_slug = ?",
+        ("other-project",),
+    ).fetchone()[0]
+    assert other_count == 1
+
+
 def test_full_lifecycle_index_embed_append_index_preserves_coverage(
     archive_dir, db_conn
 ):

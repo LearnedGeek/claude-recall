@@ -33,6 +33,7 @@ class IndexReport:
     updated_sessions: int = 0
     unchanged_sessions: int = 0
     incremental_sessions: int = 0
+    deleted_sessions: int = 0
     total_messages: int = 0
     malformed_lines: int = 0
     elapsed_seconds: float = 0.0
@@ -93,6 +94,43 @@ def run_index(
                 verbose=verbose,
                 report=report,
             )
+
+    # Issue #17: sweep orphan sessions whose JSONL files are gone from disk.
+    # Scoped to the projects we just walked so `--project foo` doesn't delete
+    # rows from project bar. The FK CASCADE from sessions.session_id handles
+    # messages and message_vectors cleanup automatically.
+    walked_slugs = [pdir.name for pdir in project_dirs]
+    if walked_slugs:
+        placeholders = ",".join("?" for _ in walked_slugs)
+        candidates = conn.execute(
+            f"SELECT session_id, file_path FROM sessions "
+            f"WHERE project_slug IN ({placeholders})",
+            walked_slugs,
+        ).fetchall()
+        to_delete = [
+            row["session_id"]
+            for row in candidates
+            if not Path(row["file_path"]).is_file()
+        ]
+        if to_delete:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                ph = ",".join("?" for _ in to_delete)
+                conn.execute(
+                    f"DELETE FROM sessions WHERE session_id IN ({ph})",
+                    to_delete,
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            report.deleted_sessions = len(to_delete)
+            if verbose:
+                print(
+                    f"[indexer] cleaned up {len(to_delete)} orphan session(s) "
+                    f"with missing JSONL files",
+                    file=sys.stderr,
+                )
 
     report.elapsed_seconds = time.monotonic() - start
     return report

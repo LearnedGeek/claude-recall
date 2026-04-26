@@ -118,6 +118,85 @@ def test_natural_language_query_zero_hit_fallback(indexed_db):
     assert "regex" in preview or "patterns" in preview
 
 
+def test_days_filter_uses_message_timestamp_not_session_started_at(
+    archive_dir, db_conn
+):
+    """Issue #13: `--days N` must filter on each message's own timestamp,
+    not on the session's `started_at`. A long-lived session whose first
+    message is older than the window can still contain recent messages
+    that should surface in scoped search.
+
+    Repro from OC's CrewTrack archive: 5,622-turn session spanning many
+    months, default `--days 90`, scoped search returns 0 despite many
+    recent matches in the unscoped result. Pre-fix the predicate was
+    `s.started_at >= ?` (excluded the whole session); post-fix it's
+    `m.timestamp >= ?` (filters individual messages).
+    """
+    project_dir = archive_dir / "test-project"
+    long_session = project_dir / "session_long_lived.jsonl"
+
+    today = datetime.now(UTC)
+    long_ago = today - timedelta(days=180)
+    recent = today - timedelta(days=5)
+
+    # Synthetic JSONL: same shape the fixture sessions use, with timestamps
+    # that straddle a 30-day window.
+    lines = [
+        json.dumps({
+            "type": "user",
+            "message": {"role": "user",
+                        "content": "ancient discussion of zebrafish patterns"},
+            "timestamp": long_ago.isoformat().replace("+00:00", "Z"),
+            "sessionId": "session_long_lived",
+        }),
+        json.dumps({
+            "type": "user",
+            "message": {"role": "user",
+                        "content": "recent quokka regex update"},
+            "timestamp": recent.isoformat().replace("+00:00", "Z"),
+            "sessionId": "session_long_lived",
+        }),
+    ]
+    long_session.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    indexer.run_index(db_conn, archive_dir)
+
+    # Sanity-check the test setup: session.started_at IS older than the
+    # 30-day cutoff. If this assertion ever fails, the test is no longer
+    # exercising the fix.
+    row = db_conn.execute(
+        "SELECT started_at FROM sessions WHERE session_id=?",
+        ("session_long_lived",),
+    ).fetchone()
+    cutoff_30 = (today - timedelta(days=30)).isoformat().replace("+00:00", "Z")
+    assert row["started_at"] < cutoff_30, (
+        "test fixture didn't end up with an old started_at; can't exercise #13"
+    )
+
+    # Recent message surfaces with --days 30 + project filter (the failing
+    # case pre-fix).
+    resp = search.run_search(
+        db_conn, "quokka", days=30, project_slug="test-project"
+    )
+    assert resp.total_matches == 1, (
+        f"recent message in long-lived session should surface within --days 30 "
+        f"window post-fix; got {resp.total_matches} match(es)"
+    )
+    assert "quokka" in resp.results[0].content_preview.lower()
+
+    # Old message correctly excluded by --days 30.
+    resp_old = search.run_search(
+        db_conn, "zebrafish", days=30, project_slug="test-project"
+    )
+    assert resp_old.total_matches == 0
+
+    # And both surface with a wide window (sanity that the data is there).
+    resp_wide = search.run_search(
+        db_conn, "zebrafish OR quokka", days=365, project_slug="test-project"
+    )
+    assert resp_wide.total_matches >= 1
+
+
 def test_unparseable_query_raises(indexed_db):
     """A query with no usable tokens raises SearchError."""
     with pytest.raises(search.SearchError):

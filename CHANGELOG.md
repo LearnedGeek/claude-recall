@@ -2,6 +2,97 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.6.1 — 2026-04-26
+
+Three small fixes closing the diagnostic threads from the v0.6.0
+weekend. Each is well-scoped and bounded; bundling rather than shipping
+three separate patches.
+
+### Migration
+
+```
+pip install --upgrade claude-recall
+```
+
+No schema migration. No re-embed required. The `--days` filter behavior
+changes semantically (per-message rather than per-session — see [#13](https://github.com/LearnedGeek/claude-recall/issues/13)
+below), which is a fix not a regression but worth knowing about if you
+were previously seeing different result counts.
+
+### Fixed
+
+- **[#13](https://github.com/LearnedGeek/claude-recall/issues/13) — `--project` filter returning zero matches against long-lived sessions.**
+  The date predicate in [`search.py`](https://github.com/LearnedGeek/claude-recall/blob/main/src/claude_recall/search.py)
+  was filtering on `sessions.started_at` (the session's *first* message
+  timestamp) rather than `messages.timestamp` (the individual message's
+  timestamp). For sessions spanning many months — like OC's CrewTrack
+  archive (5,622-turn single session) — the entire session fell outside
+  the default 90-day window, even when many of its individual messages
+  were recent. The fix flips the predicate to `m.timestamp >= ?`, which
+  is the semantically-correct interpretation of `--days N`. The existing
+  `idx_messages_timestamp` index keeps it cheap.
+
+  Diagnostic credit: OC's bare-SQL queries (Q1 — per-project hit
+  distribution; Q2 — slug hex dump) ruled out the originally-hypothesized
+  causes (slug encoding, session_id mismatch) and pointed at "the CLI
+  must be running different SQL than the bare query." That observation
+  led directly to the missing predicate.
+
+- **[#17](https://github.com/LearnedGeek/claude-recall/issues/17) — orphan session rows from removed JSONLs.**
+  `run_index()` now sweeps session rows whose `file_path` no longer
+  points at an existing JSONL. The FK CASCADE on `sessions.session_id`
+  handles `messages` and `message_vectors` cleanup automatically. Scoped
+  to the projects walked in this index run — `--project foo` won't
+  delete orphans from project bar. New `IndexReport.deleted_sessions`
+  field tracks how many were swept.
+
+  Empirical signal that motivated this: DC's v0.6.0 verification turned
+  up a 4-of-21 (~19%) orphan rate on a real-world archive — high enough
+  to be worth fixing rather than living with as a known limitation.
+
+- **[#18](https://github.com/LearnedGeek/claude-recall/issues/18) — `status --integrity-check` per-project SUM(turn_count) cartesian-inflated.**
+  The diagnostic-tool itself had a bug: the per-project query joined
+  `messages` directly under the outer `GROUP BY`, producing a
+  cartesian explosion (for a session with N messages, the join
+  produced N rows each carrying turn_count=N, summed = N²). Every
+  project on a healthy archive falsely flagged as mismatched. Fixed
+  by aggregating per-session first via a CTE, then summing per-project.
+  False-positive `⚠ turn_count/messages mismatch` warnings will stop
+  appearing on healthy archives.
+
+  Diagnostic credit: the inflation pattern was unmistakable in OC's
+  output — every single-session project's `stored_turns` exactly equaled
+  `actual_msgs²` (1672² = 2,795,584 for WCTC; 5768² = 33,269,824 for
+  CrewTrack; etc.). The math locked the diagnosis in one read.
+
+### Tests
+
+- `test_days_filter_uses_message_timestamp_not_session_started_at`
+  ([tests/test_search.py](https://github.com/LearnedGeek/claude-recall/blob/main/tests/test_search.py)) —
+  constructs a synthetic long-lived session whose `started_at` is 180
+  days old but whose recent messages are 5 days old. Asserts that
+  scoped search with `--days 30` surfaces the recent messages and not
+  the old ones.
+- `test_orphan_session_sweep_removes_deleted_files` and
+  `test_orphan_sweep_scoped_to_walked_projects`
+  ([tests/test_indexer.py](https://github.com/LearnedGeek/claude-recall/blob/main/tests/test_indexer.py)) —
+  cover the cascade behavior (messages and vectors cleared along with
+  the orphan session row) and the project-scope guard.
+- `test_status_integrity_check_per_project_no_cartesian_inflation`
+  ([tests/test_cli.py](https://github.com/LearnedGeek/claude-recall/blob/main/tests/test_cli.py)) —
+  parses the per-project line for the multi-session fixture and
+  asserts `stored_turns == actual_msgs`, plus that the false-positive
+  warning is absent.
+
+Total: 174 tests pass (was 170 — 4 new). 1 platform-skipped.
+
+### Deferred
+
+- **[#19](https://github.com/LearnedGeek/claude-recall/issues/19) — cp1252 UnicodeEncodeError on Windows for non-ASCII content.**
+  Filed during this triage pass but not bundled into v0.6.1 — different
+  layer of the stack (CLI output encoding), worth its own focused fix
+  in a v0.6.2 or later.
+
 ## v0.6.0 — 2026-04-25
 
 Architectural fix for [issue #16](https://github.com/LearnedGeek/claude-recall/issues/16):

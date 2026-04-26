@@ -758,18 +758,32 @@ def _run_integrity_check(cfg: Config) -> int:
         # Per-project breakdown
         print()
         print("per-project:")
+        # Issue #18: aggregate per-session FIRST via a CTE, then sum
+        # per-project. The previous query joined messages directly under the
+        # outer GROUP BY, producing a cartesian explosion: for a session with
+        # N messages, the join produced N rows each carrying turn_count=N,
+        # SUM = N². Every project on a healthy archive falsely flagged as
+        # mismatched. The CTE avoids the inflation by aggregating COUNT(m)
+        # per session before summing turn_count per project.
         breakdown = conn.execute(
             """
-            SELECT s.project_slug,
-                   COUNT(DISTINCT s.session_id) AS sessions,
-                   SUM(s.turn_count) AS stored_turns,
-                   COUNT(m.msg_id) AS actual_msgs,
-                   COUNT(v.msg_id) AS vectors
-            FROM sessions s
-            LEFT JOIN messages m ON m.session_id = s.session_id
-            LEFT JOIN message_vectors v ON v.msg_id = m.msg_id
-            GROUP BY s.project_slug
-            ORDER BY s.project_slug
+            WITH session_stats AS (
+                SELECT s.session_id, s.project_slug, s.turn_count,
+                       COUNT(m.msg_id) AS msgs,
+                       COUNT(v.msg_id) AS vectors
+                FROM sessions s
+                LEFT JOIN messages m ON m.session_id = s.session_id
+                LEFT JOIN message_vectors v ON v.msg_id = m.msg_id
+                GROUP BY s.session_id, s.project_slug, s.turn_count
+            )
+            SELECT project_slug,
+                   COUNT(*) AS sessions,
+                   SUM(turn_count) AS stored_turns,
+                   SUM(msgs) AS actual_msgs,
+                   SUM(vectors) AS vectors
+            FROM session_stats
+            GROUP BY project_slug
+            ORDER BY project_slug
             """
         ).fetchall()
         for row in breakdown:

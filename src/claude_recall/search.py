@@ -121,8 +121,17 @@ def run_search(
         JOIN messages m ON m.msg_id = messages_fts.rowid
         JOIN sessions s ON s.session_id = m.session_id
         WHERE messages_fts MATCH ?
-          AND (s.started_at IS NULL OR s.started_at >= ?)
+          AND (m.timestamp IS NULL OR m.timestamp >= ?)
     """
+    # Issue #13: per-message timestamp filter, not per-session start time.
+    # The previous predicate (`s.started_at >= ?`) excluded entire long-lived
+    # sessions whose first message was older than the cutoff — even when
+    # individual messages within them were recent. Diagnosed against OC's
+    # CrewTrack archive (5,622-turn single session spanning many months;
+    # default `--days 90` returned zero hits despite 139 fresh "dashboard"
+    # matches in the unscoped query). `m.timestamp` is the semantically
+    # correct column — `--days N` should mean "messages from the last N
+    # days," and the existing idx_messages_timestamp index keeps it cheap.
     tail_params: list = [cutoff_iso]
     if project_slug:
         # Case-insensitive match so callers can pass either the canonical

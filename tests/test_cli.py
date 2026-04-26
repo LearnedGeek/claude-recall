@@ -389,6 +389,47 @@ def test_status_integrity_check_reports_row_counts(cli_env, capsys):
     assert "test-project" in out
 
 
+def test_status_integrity_check_per_project_no_cartesian_inflation(cli_env):
+    """Issue #18: per-project SUM(turn_count) must NOT be cartesian-inflated
+    by the messages JOIN. Pre-fix, every multi-message session caused
+    stored_turns to equal actual_msgs² (the JOIN replicated turn_count per
+    message row). On a healthy archive, stored_turns SHOULD equal actual_msgs.
+    """
+    import re
+    cli_env["run"]("index")
+    code, out, _ = cli_env["run"]("status", "--integrity-check")
+    assert code == 0
+
+    # Find the per-project line for test-project.
+    test_line = next(
+        (line for line in out.splitlines()
+         if "test-project" in line and "sessions=" in line),
+        None,
+    )
+    assert test_line is not None, f"test-project line not found in: {out!r}"
+
+    m = re.search(
+        r"stored_turns=\s*(\d+).*actual_msgs=\s*(\d+)", test_line
+    )
+    assert m is not None, f"could not parse stored_turns/actual_msgs from: {test_line!r}"
+    stored_turns = int(m.group(1))
+    actual_msgs = int(m.group(2))
+
+    # Pre-fix expectation (the bug we're closing): for the fixture archive
+    # with 3 sessions of 5/3/3 messages, stored_turns would have been
+    # 5²+3²+3² = 43 (cartesian-inflated). Post-fix it equals 5+3+3 = 11.
+    # We just assert that they MATCH and aren't squared.
+    assert stored_turns == actual_msgs, (
+        f"per-project SUM(turn_count) cartesian-inflated: stored_turns="
+        f"{stored_turns}, actual_msgs={actual_msgs}; should be equal on a "
+        f"healthy archive (a multi-session test-project)"
+    )
+    # And the warning flag must NOT fire on a healthy archive.
+    assert "⚠ turn_count/messages mismatch" not in test_line, (
+        f"false-positive mismatch warning on healthy archive: {test_line!r}"
+    )
+
+
 def test_status_integrity_check_flags_fts_mismatch(tmp_path, monkeypatch, capsys):
     """When messages vs messages_fts row counts disagree, integrity check
     surfaces a warning — the exact trigger-didn't-fire hypothesis from #13."""
