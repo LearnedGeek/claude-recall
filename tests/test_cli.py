@@ -5,6 +5,7 @@ See docs/PLAN.md sections 6 (CLI spec), 10.4, and 11 (test plan).
 
 import json
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -191,6 +192,54 @@ def test_status_agent_context_format(cli_env):
     assert line.startswith("claude-recall:")
     assert "sessions" in line
     assert "messages indexed" in line
+
+
+def test_main_forces_utf8_stdout_for_cp1252_safety():
+    """Issues #19 and #22: main() reconfigures stdout/stderr to UTF-8 so
+    non-ASCII characters in output (⚠ warning sign in stale-vector
+    status, → arrows in search results, ≥ in user content, em-dashes
+    in CHANGELOG-style text, etc.) don't crash on Windows's default
+    cp1252 console without users having to set PYTHONIOENCODING=utf-8.
+
+    The reconfigure happens at main() entry, before any print(), so all
+    subsequent output is utf-8 regardless of the user's environment
+    variables or console codepage. The C-API path is more reliable than
+    expecting users to know about an env var.
+    """
+    import io as _io
+    saved_stdout, saved_stderr = sys.stdout, sys.stderr
+    try:
+        # Replace stdout/stderr with cp1252-encoded TextIOWrappers. Pre-fix,
+        # any print() containing non-ASCII would crash via charmap codec.
+        sys.stdout = _io.TextIOWrapper(
+            _io.BytesIO(), encoding="cp1252", errors="strict"
+        )
+        sys.stderr = _io.TextIOWrapper(
+            _io.BytesIO(), encoding="cp1252", errors="strict"
+        )
+
+        # --version is a lightweight path that exits cleanly via SystemExit.
+        # It runs main()'s reconfigure prelude regardless.
+        with pytest.raises(SystemExit) as exc:
+            cli.main(["--version"])
+        assert exc.value.code == 0
+
+        # main() reconfigured both streams to utf-8.
+        assert sys.stdout.encoding.lower().startswith("utf"), (
+            f"stdout not reconfigured to utf-8: {sys.stdout.encoding}"
+        )
+        assert sys.stderr.encoding.lower().startswith("utf"), (
+            f"stderr not reconfigured to utf-8: {sys.stderr.encoding}"
+        )
+
+        # Writing non-ASCII now succeeds — would have crashed pre-fix
+        # because the underlying TextIOWrapper was cp1252-strict.
+        sys.stdout.write("⚠ → ≥ — em-dash")
+        sys.stdout.flush()
+        sys.stderr.write("⚠ → ≥ — em-dash")
+        sys.stderr.flush()
+    finally:
+        sys.stdout, sys.stderr = saved_stdout, saved_stderr
 
 
 def test_status_text_format(cli_env):

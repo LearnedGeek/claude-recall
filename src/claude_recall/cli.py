@@ -153,6 +153,25 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Issues #19 and #22: force UTF-8 encoding on stdout/stderr so non-ASCII
+    # characters in output (em-dashes, arrows, ≥, etc.) don't crash on
+    # Windows's default cp1252 console. The C-API path through reconfigure
+    # is more reliable than PYTHONIOENCODING=utf-8 since it doesn't require
+    # users to know about an env var. Guard via hasattr because some test
+    # contexts replace stdout with a non-text stream that doesn't support
+    # reconfigure.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                # ValueError: stream already detached. OSError: rare TTY edge
+                # case. Either way, fall back to whatever encoding was set —
+                # output may still crash on cp1252 hosts, but at least we
+                # tried, and we never let the reconfigure attempt itself
+                # take down the CLI.
+                pass
+
     parser = build_parser()
     args = parser.parse_args(argv)
 

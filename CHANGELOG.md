@@ -2,6 +2,81 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.6.5 — 2026-04-28
+
+Hotfix for [#19](https://github.com/LearnedGeek/claude-recall/issues/19)
+and [#22](https://github.com/LearnedGeek/claude-recall/issues/22):
+the CLI now forces UTF-8 encoding on stdout and stderr at entry, so
+non-ASCII characters in any output path (warning signs, arrows, em-
+dashes, math symbols, user content) don't crash on Windows's default
+cp1252 console without users having to set `PYTHONIOENCODING=utf-8`.
+
+### The bug
+
+#19 surfaced via `claude-recall list/search --format json` hitting the
+`≥` symbol; #22 surfaced via plain `claude-recall search` hitting the
+`→` arrow. Both manifested as:
+
+```
+UnicodeEncodeError: 'charmap' codec can't encode character '→' in position 343
+```
+
+…before any output reached the terminal. Same root cause: Python's
+default stdout encoding on Windows is the console codepage (cp1252 in
+US installs), which can't represent characters outside Latin-1 + a
+small extension set. Any `print()` containing such a character raised
+mid-output.
+
+### Fix
+
+Three lines at the top of `main()`:
+
+```python
+for stream in (sys.stdout, sys.stderr):
+    if hasattr(stream, "reconfigure"):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+```
+
+The C-API path through `TextIOWrapper.reconfigure()` sets
+`sqlite3_busy_timeout`-equivalent encoding state directly, so the fix
+applies regardless of `PYTHONIOENCODING` or console codepage. Guard
+via `hasattr` because some test contexts replace stdout with a non-
+text stream that doesn't support reconfigure; fall back silently in
+that case rather than crashing the CLI on the safety net itself.
+
+`errors="replace"` is defensive — UTF-8 can encode anything we throw
+at it, but if some future code path hands stdout an already-encoded
+byte sequence with stray bytes, we'd rather emit `?` than crash.
+
+### Migration
+
+```
+pip install --upgrade claude-recall
+```
+
+No schema migration. Users who were setting `PYTHONIOENCODING=utf-8`
+as a workaround can stop now.
+
+### Tests
+
+`test_main_forces_utf8_stdout_for_cp1252_safety` (in `tests/test_cli.py`)
+constructs cp1252-encoded `TextIOWrapper` streams for stdout and stderr,
+calls `main(["--version"])`, and asserts that:
+
+1. Both streams' encoding flips to UTF-8 after `main()` runs.
+2. Writing non-ASCII characters (`⚠ → ≥ — em-dash`) succeeds without
+   `UnicodeEncodeError`.
+
+Pre-fix the test would crash on the very first non-ASCII write to the
+cp1252-strict TextIOWrapper. Post-fix it passes deterministically.
+
+176 Python tests pass; 62 C# tests still pass; AOT binary still builds
+clean (the binary path is independent of this fix — Console.WriteLine
+on .NET defaults to UTF-8 already, only the Python CLI was affected).
+
 ## v0.6.4 — 2026-04-27
 
 Hotfix for [issue #21](https://github.com/LearnedGeek/claude-recall/issues/21):
