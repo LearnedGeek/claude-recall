@@ -1,8 +1,16 @@
 // claude-recall-hook — UserPromptSubmit hook binary (v0.4).
 //
 // Single-file NativeAOT exe that replaces the Python-CLI-based hook path.
-// Reads {"prompt": "..."} on stdin, writes {"additionalContext": "..."} or {}
-// on stdout. Always exits 0 — Claude Code hook contract requires non-blocking.
+// Reads {"prompt": "..."} on stdin, writes the wrapped Claude Code hook
+// envelope on stdout:
+//
+//   {"hookSpecificOutput":
+//     {"hookEventName":"UserPromptSubmit","additionalContext":"..."}}
+//
+// or `{}` when there are no matches. Always exits 0 — Claude Code hook
+// contract requires non-blocking. Issue #21 (v0.6.4): switched from the
+// legacy top-level `additionalContext` shape; the strict-validation pass
+// alongside Claude Code v2.1.118 silently drops the top-level form.
 //
 // See docs/HOOK-BINARY-PLAN.md for the full design.
 
@@ -234,7 +242,16 @@ internal static class Program
             if (i < results.Count - 1) sb.Append('\n');
         }
 
-        var payload = new AgentContextEnvelope { AdditionalContext = sb.ToString() };
+        // Issue #21: wrapped form. See Program.cs header comment for the
+        // strict-validation backstory.
+        var payload = new AgentContextEnvelope
+        {
+            HookSpecificOutput = new HookSpecificOutput
+            {
+                HookEventName = "UserPromptSubmit",
+                AdditionalContext = sb.ToString(),
+            },
+        };
         var json = JsonSerializer.Serialize(payload, ProgramJsonContext.Default.AgentContextEnvelope);
         Console.WriteLine(json);
     }
@@ -302,10 +319,20 @@ internal sealed class CliArgs
 
 internal sealed class AgentContextEnvelope
 {
+    // Issue #21 (v0.6.4): wrapped under hookSpecificOutput per Claude Code's
+    // hook output schema. The legacy top-level `additionalContext` form is
+    // silently dropped by the strict-validation pass.
+    [JsonPropertyName("hookSpecificOutput")] public HookSpecificOutput HookSpecificOutput { get; set; } = new();
+}
+
+internal sealed class HookSpecificOutput
+{
+    [JsonPropertyName("hookEventName")] public string HookEventName { get; set; } = "UserPromptSubmit";
     [JsonPropertyName("additionalContext")] public string AdditionalContext { get; set; } = string.Empty;
 }
 
 [JsonSerializable(typeof(AgentContextEnvelope))]
+[JsonSerializable(typeof(HookSpecificOutput))]
 [JsonSerializable(typeof(ProbeResult))]
 internal partial class ProgramJsonContext : JsonSerializerContext
 {

@@ -236,18 +236,39 @@ def test_format_json_shape(indexed_db):
 
 
 def test_format_agent_context_with_results(indexed_db):
-    """--agent-context emits a {'additionalContext': ...} JSON block."""
+    """Issue #21 (v0.6.4): --agent-context emits the wrapped Claude Code
+    hook envelope: ``{"hookSpecificOutput": {"hookEventName":
+    "UserPromptSubmit", "additionalContext": "..."}}``. The legacy
+    top-level ``{"additionalContext": ...}`` form is silently dropped
+    by Claude Code's strict-validation pass; the wrapped form is the
+    canonical schema-correct shape.
+    """
     resp = search.run_search(indexed_db, "regex")
     body = search.format_result(resp, format="agent-context")
     payload = json.loads(body)
-    assert "additionalContext" in payload
-    assert "regex" in payload["additionalContext"].lower()
-    # <mark> wrappers are stripped before injection
-    assert "<mark>" not in payload["additionalContext"]
+
+    # Wrapped envelope shape.
+    assert "hookSpecificOutput" in payload, (
+        f"top-level wrapper missing — Claude Code's strict validator drops "
+        f"legacy top-level shapes silently: {payload!r}"
+    )
+    assert "additionalContext" not in payload, (
+        f"legacy top-level additionalContext present — should be wrapped "
+        f"under hookSpecificOutput: {payload!r}"
+    )
+
+    inner = payload["hookSpecificOutput"]
+    assert inner.get("hookEventName") == "UserPromptSubmit"
+    assert "regex" in inner["additionalContext"].lower()
+    # <mark> wrappers are stripped before injection.
+    assert "<mark>" not in inner["additionalContext"]
 
 
 def test_format_agent_context_empty_when_no_results(indexed_db):
-    """--agent-context is literally '{}' when no results — hook contract."""
+    """--agent-context is literally '{}' when no results — hook contract.
+    Empty payload is the no-op signal regardless of the wrapped vs legacy
+    shape, so this assertion stays the same across v0.6.4.
+    """
     resp = search.run_search(indexed_db, "regex", threshold=999.0)
     assert search.format_result(resp, format="agent-context") == "{}"
 

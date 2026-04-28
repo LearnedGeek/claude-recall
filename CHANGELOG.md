@@ -2,6 +2,93 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.6.4 — 2026-04-27
+
+Hotfix for [issue #21](https://github.com/LearnedGeek/claude-recall/issues/21):
+claude-recall's hook output was using the legacy top-level
+`additionalContext` shape, which Claude Code's strict-validation pass
+silently drops. **The hook was firing and the JSON was correct, but
+the additionalContext never reached the model.** Same shape as #15
+applied to the output side instead of the input side.
+
+### The bug
+
+All three claude-recall hook output paths (`search.py:_format_agent_context`,
+`session_start.ps1`, `session_start.sh`, and the NativeAOT binary's
+`Program.cs:WriteAgentContext`) emitted:
+
+```json
+{"additionalContext": "..."}
+```
+
+Claude Code's hook output schema requires the wrapped form:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "UserPromptSubmit",
+    "additionalContext": "..."
+  }
+}
+```
+
+Top-level was accepted leniently by older Claude Code versions; the
+strict pass introduced alongside [Claude Code v2.1.118](https://github.com/anthropics/claude-code/releases/tag/v2.1.118)
+silently drops it. **No error, no log, no warning.** The hook ran
+successfully but the injection went nowhere. This was diagnosable only
+by:
+
+1. Verifying the hook output JSON by hand (which would say "correct"),
+2. Then noticing that Claude couldn't actually see the injected context
+   (e.g., asking "what time is it?" and getting a stale answer),
+3. Then realizing the format was the gap.
+
+The maintainer's session received hard evidence during triage: switching
+a custom user hook to the wrapped form caused Claude Code to surface
+the injection as a labeled `system-reminder` (`UserPromptSubmit hook
+additional context: ...`). The same labeling was never appearing for
+claude-recall's own output, confirming the legacy shape was being
+silently dropped.
+
+### Fixed
+
+- **`search.py:_format_agent_context`** — wraps under
+  `hookSpecificOutput` with `hookEventName: "UserPromptSubmit"`.
+- **`session_start.ps1` and `session_start.sh`** — wrap under
+  `hookSpecificOutput` with `hookEventName: "SessionStart"`.
+- **C# `Program.cs:WriteAgentContext`** — new `HookSpecificOutput`
+  class, updated `AgentContextEnvelope` to nest it, source generator
+  registration extended.
+
+All four paths now emit the canonical schema-correct shape. The
+NativeAOT binary in the Windows wheel is rebuilt by CI on tag push,
+so users `pip install --upgrade claude-recall` will get a binary that
+emits the wrapped form automatically — no `init-hooks --force`
+required for the binary itself, though re-running it doesn't hurt and
+will refresh the binary copy in `.claude/hooks/`.
+
+### Migration
+
+```
+pip install --upgrade claude-recall
+```
+
+If you have user-added sibling hooks (e.g., a time-injection hook),
+make sure they also use the wrapped form — see issue #21 for the
+PowerShell snippet. v0.6.3's `init-hooks --force` preserves your
+sibling hooks, so this works cleanly.
+
+### Tests
+
+- `test_format_agent_context_with_results` updated to assert wrapped
+  envelope shape and explicitly reject the top-level legacy form.
+- `test_session_start_hook_emits_valid_json` updated similarly with
+  the `hookEventName: "SessionStart"` assertion.
+- Negative assertion (`additionalContext NOT at top level`) makes the
+  test loud if anyone reverts to the legacy shape.
+
+175 Python tests pass; 62 C# tests pass; AOT binary builds clean.
+
 ## v0.6.3 — 2026-04-26
 
 Hotfix for [issue #20](https://github.com/LearnedGeek/claude-recall/issues/20):

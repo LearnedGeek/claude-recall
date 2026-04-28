@@ -344,7 +344,19 @@ def _format_json(response: SearchResponse) -> str:
 
 
 def _format_agent_context(response: SearchResponse) -> str:
-    """Emit the Claude Code hook JSON: ``{"additionalContext": "..."}``.
+    """Emit the Claude Code hook JSON in the canonical wrapped form.
+
+    Schema-correct shape (per Claude Code's hook output contract):
+
+        {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+                                "additionalContext": "..."}}
+
+    Issue #21 (v0.6.4): we previously emitted top-level
+    ``{"additionalContext": "..."}``, which was accepted leniently by
+    older Claude Code versions but is silently dropped by the strict-
+    validation pass that came in alongside the v2.1.118 hook-schema
+    tightening. Switched to the wrapped form so context injection
+    actually reaches the model again.
 
     Empty ``{}`` when there are no results — the hook treats this as a no-op.
     """
@@ -356,7 +368,13 @@ def _format_agent_context(response: SearchResponse) -> str:
         short_id = r.session_id[:8]
         clean = _strip_marks(r.snippet)
         lines.append(f"[Session {short_id}, {date_part}] {r.role}: {clean}")
-    return json.dumps({"additionalContext": "\n".join(lines)}, ensure_ascii=False)
+    payload = {
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": "\n".join(lines),
+        }
+    }
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def _format_text(response: SearchResponse) -> str:

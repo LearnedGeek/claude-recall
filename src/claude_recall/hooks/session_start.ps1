@@ -16,8 +16,15 @@ try {
 $status = & claude-recall status --format agent-context 2>$null
 if (-not $status) { $status = "claude-recall: unavailable" }
 
+# Issue #21 (v0.6.4): wrap in hookSpecificOutput. Top-level
+# `additionalContext` was the legacy form Claude Code accepted leniently;
+# the strict-validation pass alongside v2.1.118's hook-schema tightening
+# silently drops top-level. Canonical wrapped shape works everywhere.
 $out = @{
-    additionalContext = "claude-recall status: $status`n`nPrior-session archive is searchable via the ``claude-recall search <query>`` CLI, and matching context will be auto-injected when your prompt references prior work."
+    hookSpecificOutput = @{
+        hookEventName = 'SessionStart'
+        additionalContext = "claude-recall status: $status`n`nPrior-session archive is searchable via the ``claude-recall search <query>`` CLI, and matching context will be auto-injected when your prompt references prior work."
+    }
 }
 $out | ConvertTo-Json -Compress
 

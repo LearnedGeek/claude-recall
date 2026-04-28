@@ -157,13 +157,22 @@ def _run_hook(cmd: list[str], env: dict, stdin_bytes: bytes = b"") -> tuple[int,
     reason="no bash or pwsh available on this host",
 )
 def test_session_start_hook_emits_valid_json(hook_env):
-    """SessionStart hook stdout parses as JSON with additionalContext field."""
+    """SessionStart hook stdout parses as JSON in the wrapped envelope shape.
+
+    Issue #21 (v0.6.4): wrapped under hookSpecificOutput. Legacy top-level
+    additionalContext is silently dropped by Claude Code's strict-validation
+    pass.
+    """
     cmd = _hook_cmd("session_start")
     code, out = _run_hook(cmd, env=hook_env["env"])
     assert code == 0
     payload = json.loads(out)
-    assert "additionalContext" in payload
-    assert "claude-recall" in payload["additionalContext"]
+    assert "hookSpecificOutput" in payload, (
+        f"SessionStart hook output not wrapped: {payload!r}"
+    )
+    inner = payload["hookSpecificOutput"]
+    assert inner.get("hookEventName") == "SessionStart"
+    assert "claude-recall" in inner["additionalContext"]
 
 
 @pytest.mark.skipif(
