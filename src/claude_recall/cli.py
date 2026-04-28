@@ -50,6 +50,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_index.add_argument("--archive-root", help="Override archive root path.")
     p_index.add_argument("--rebuild", action="store_true", help="Full rebuild.")
     p_index.add_argument("--verbose", action="store_true")
+    # Issue #23 (v0.6.6): suppresses the auto-embed pass that runs at end
+    # of index when embeddings are enabled and the new tail is small. Used
+    # by the SessionStart hook (which fires on every session open and
+    # can't afford the latency) and by CI/scripted runs that want strict
+    # separation between index and embed steps.
+    p_index.add_argument(
+        "--no-embed", action="store_true",
+        help="Skip the auto-embed pass that runs after small index updates."
+    )
 
     # search
     p_search = sub.add_parser("search", help="Query the index.")
@@ -235,7 +244,110 @@ def _cmd_index(args: argparse.Namespace, cfg: Config) -> int:
         f"{report.malformed_lines} malformed lines) "
         f"in {report.elapsed_seconds:.2f}s"
     )
+
+    # Issue #23 (v0.6.6): auto-embed the new tail when small enough. v0.6.0
+    # made vectors survive routine re-ingest; this closes the last gap by
+    # eliminating the manual `embed` step for the common case of routine
+    # active-session index runs. Bounded at AUTO_EMBED_THRESHOLD so users
+    # don't get a multi-minute surprise from a long-deferred backfill —
+    # those still go through manual `claude-recall embed`.
+    _maybe_auto_embed(args, cfg, report)
     return 0
+
+
+AUTO_EMBED_THRESHOLD = 100
+
+
+def _maybe_auto_embed(
+    args: argparse.Namespace, cfg: Config, report
+) -> None:
+    """Run `embed` on the new tail iff all guards pass. Never raises.
+
+    Guards:
+    - `--no-embed` not passed (SessionStart hook + CI users opt out)
+    - `[embeddings].enabled` true
+    - new-tail size in (0, AUTO_EMBED_THRESHOLD]
+    - Ollama reachable
+    - the [embeddings] extra is importable
+
+    Failure during embed is non-fatal — index already succeeded; we print a
+    single-line hint to stderr and return.
+    """
+    if args.no_embed:
+        return
+    if not cfg.embeddings.enabled:
+        return
+    new_msgs = report.total_messages
+    if new_msgs <= 0:
+        return
+    if new_msgs > AUTO_EMBED_THRESHOLD:
+        print(
+            f"  ({new_msgs} new messages exceed auto-embed threshold of "
+            f"{AUTO_EMBED_THRESHOLD} — run `claude-recall embed` to "
+            f"embed them)",
+            file=sys.stderr,
+        )
+        return
+
+    try:
+        from . import embeddings as _embeddings  # noqa: F401
+    except ImportError:
+        # [embeddings] extra not installed; nothing to do.
+        return
+
+    if not _probe_ollama_reachable(cfg):
+        print(
+            f"  ({new_msgs} new message(s) — Ollama unreachable, skipping "
+            f"auto-embed; run `claude-recall embed` when ready)",
+            file=sys.stderr,
+        )
+        return
+
+    try:
+        conn = storage.open_db(cfg.db_path)
+    except storage.StorageError:
+        return  # index already succeeded; embed connection failed silently
+
+    project_slug = args.project
+    if project_slug == "auto":
+        project_slug = projects.resolve_project_slug(conn)
+
+    client = _ollama_client_factory(
+        cfg.embeddings.ollama_base_url,
+        cfg.embeddings.model,
+        cfg.embeddings.request_timeout_seconds,
+        max_input_chars=cfg.embeddings.max_input_chars,
+        keep_alive=cfg.embeddings.keep_alive,
+    )
+    try:
+        embed_report = _run_embed(
+            conn,
+            client,
+            project_slug=project_slug,
+            rebuild=False,
+            model=cfg.embeddings.model,
+            batch_size=cfg.embeddings.batch_size,
+            verbose=args.verbose,
+        )
+        if args.verbose:
+            print(
+                f"  auto-embedded {embed_report['embedded']} message(s) "
+                f"in {embed_report['elapsed']:.2f}s",
+                file=sys.stderr,
+            )
+    except Exception as exc:  # noqa: BLE001
+        # Index already succeeded — embed failure is non-fatal.
+        print(
+            f"  auto-embed failed: {exc} (run `claude-recall embed` "
+            f"to retry)",
+            file=sys.stderr,
+        )
+    finally:
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001
+            pass
+        conn.close()
 
 
 # --- search -----------------------------------------------------------------

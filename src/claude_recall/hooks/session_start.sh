@@ -9,8 +9,11 @@
 set +e
 exec 2>/dev/null
 
-# Silent incremental index
-claude-recall index >/dev/null 2>&1 || true
+# Silent incremental index. --no-embed (issue #23, v0.6.6) keeps the
+# auto-embed pass from firing inside the session-start latency budget.
+# Manual `claude-recall index` handles embed, or the user runs
+# `claude-recall embed` when status surfaces a coverage warning.
+claude-recall index --no-embed >/dev/null 2>&1 || true
 
 # Status line
 STATUS=$(claude-recall status --format agent-context 2>/dev/null || echo "claude-recall: unavailable")

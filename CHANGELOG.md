@@ -2,6 +2,94 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.6.6 — 2026-04-28
+
+Closes [#23](https://github.com/LearnedGeek/claude-recall/issues/23):
+`claude-recall index` now auto-runs `embed` on the new tail when the
+work is bounded and embeddings are enabled. Eliminates the manual
+maintenance step that v0.5.5's stale-vector warning previously asked
+users to take.
+
+### Why
+
+v0.6.0 made vectors survive routine re-ingest (content-hash diff
+stopped the FK CASCADE on every index run). That fix closed the
+catastrophic loss path. The remaining gap was that *new* messages
+appended to active sessions still needed a manual `claude-recall
+embed` to become semantically searchable. v0.5.5's loud warning when
+coverage dropped below 95% surfaced the gap; this release closes it.
+
+### Behavior
+
+`claude-recall index` now runs an auto-embed pass at the end iff:
+
+1. `[embeddings].enabled` is true
+2. `--no-embed` flag was not passed
+3. The new-message count is in `(0, 100]`
+4. Ollama is reachable (probed via the existing helper)
+5. The `[embeddings]` extra is importable
+
+Above the 100-message threshold, the index step prints a hint to
+stderr and exits clean — manual `claude-recall embed` is the right
+shape for larger backfills (avoids surprising the user with multi-
+minute waits inside `index`). The threshold is exposed as
+`cli.AUTO_EMBED_THRESHOLD` so it's monkeypatchable for tests but not
+configurable at runtime; chosen at 100 because that's roughly an
+upper bound on per-session activity in steady-state Claude Code use.
+
+If embed fails partway (Ollama hiccup, network blip), the index step
+has already succeeded — embed failure is non-fatal, prints a hint to
+stderr, exits 0. Manual retry via `claude-recall embed` recovers.
+
+### `--no-embed` flag (and why SessionStart uses it)
+
+A new `--no-embed` flag suppresses the auto-embed pass. Two consumers:
+
+1. **The SessionStart hook.** `session_start.ps1` and `session_start.sh`
+   both now call `claude-recall index --no-embed` instead of
+   `claude-recall index`. Reasoning: SessionStart fires on every
+   Claude Code session open, and the session-start latency budget
+   can't afford a synchronous Ollama round trip every time. Manual
+   `claude-recall index` (or the next embed-stale warning from
+   `status`) handles embed instead.
+2. **CI / scripted runs** that want strict separation between index
+   and embed steps.
+
+### Migration
+
+```
+pip install --upgrade claude-recall
+claude-recall init-hooks --force
+```
+
+The `init-hooks --force` step is necessary on any project where you
+want the SessionStart hook to use the new `--no-embed` flag — the
+session_start.ps1/.sh in `.claude/hooks/` is a per-project copy that
+init-hooks last propagated. v0.6.3's `--force` preserves user-added
+sibling commands (time-injection hooks, etc.), so re-running is safe.
+
+If you skip the `init-hooks --force`, your existing SessionStart hook
+will still call `claude-recall index` without `--no-embed`. v0.6.6
+will then auto-embed during session start, adding ~5-30s latency
+depending on how many new messages accumulated since last open.
+Functional, but slower — `--force` to refresh the per-project copy
+fixes it.
+
+### Tests
+
+- `test_index_auto_embeds_small_tail_when_embeddings_enabled` — happy
+  path: fresh index, embeddings enabled, fake Ollama; assert vectors
+  populate to match message count.
+- `test_index_no_embed_flag_skips_auto_embed` — flag suppresses the
+  pass even when all other guards pass.
+- `test_index_skips_auto_embed_above_threshold` — monkeypatched to
+  threshold=5; 11-message fixture exceeds it; assert hint printed,
+  no vectors created.
+- `test_index_does_not_auto_embed_when_embeddings_disabled` — config
+  with embeddings off; no auto-embed regardless of new-tail size.
+
+180 Python tests pass; 62 C# tests pass; AOT binary builds clean.
+
 ## v0.6.5 — 2026-04-28
 
 Hotfix for [#19](https://github.com/LearnedGeek/claude-recall/issues/19)

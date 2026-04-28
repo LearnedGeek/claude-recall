@@ -1418,6 +1418,136 @@ def test_embed_populates_message_vectors(tmp_path, capsys, monkeypatch):
     assert vec_count > 0
 
 
+def test_index_auto_embeds_small_tail_when_embeddings_enabled(
+    tmp_path, capsys, monkeypatch
+):
+    """Issue #23 (v0.6.6): when [embeddings].enabled is true and the new
+    tail is at-or-under the threshold, `claude-recall index` auto-runs
+    embed at the end. Closes the maintenance gap that v0.5.5's stale-
+    vector warning previously asked the user to fix manually.
+    """
+    archive_root = _seed_archive(tmp_path)
+    db_path = tmp_path / "index.db"
+    cfg = _enable_embeddings_cfg(tmp_path, archive_root, db_path)
+    _use_fake_ollama(monkeypatch, _FakeOllama())
+
+    code = cli.main(["--config", str(cfg), "index"])
+    assert code == 0
+
+    from claude_recall import storage
+    conn = storage.open_db(db_path)
+    try:
+        msg_count = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        vec_count = conn.execute(
+            "SELECT COUNT(*) FROM message_vectors"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    # All 11 fixture messages are within the 100-message threshold, so
+    # auto-embed fires and produces full coverage.
+    assert msg_count > 0
+    assert vec_count == msg_count, (
+        f"auto-embed didn't run: msg_count={msg_count}, vec_count={vec_count}"
+    )
+
+
+def test_index_no_embed_flag_skips_auto_embed(
+    tmp_path, capsys, monkeypatch
+):
+    """Issue #23: --no-embed is the explicit opt-out used by the
+    SessionStart hook (which can't afford the latency on every session
+    open) and by CI/scripted runs that want strict separation between
+    index and embed steps.
+    """
+    archive_root = _seed_archive(tmp_path)
+    db_path = tmp_path / "index.db"
+    cfg = _enable_embeddings_cfg(tmp_path, archive_root, db_path)
+    _use_fake_ollama(monkeypatch, _FakeOllama())
+
+    code = cli.main(["--config", str(cfg), "index", "--no-embed"])
+    assert code == 0
+
+    from claude_recall import storage
+    conn = storage.open_db(db_path)
+    try:
+        vec_count = conn.execute(
+            "SELECT COUNT(*) FROM message_vectors"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert vec_count == 0, (
+        f"--no-embed didn't suppress auto-embed: vec_count={vec_count}"
+    )
+
+
+def test_index_skips_auto_embed_above_threshold(
+    tmp_path, capsys, monkeypatch
+):
+    """Issue #23: when the new tail exceeds AUTO_EMBED_THRESHOLD, index
+    prints a hint and leaves embed to manual invocation. Bounded latency
+    is the load-bearing property — users should never get a multi-minute
+    surprise inside `index`.
+    """
+    archive_root = _seed_archive(tmp_path)
+    db_path = tmp_path / "index.db"
+    cfg = _enable_embeddings_cfg(tmp_path, archive_root, db_path)
+    _use_fake_ollama(monkeypatch, _FakeOllama())
+
+    # Lower the threshold so the 11-message fixture exceeds it. (Faster
+    # than constructing a 100+ message synthetic archive in test setup.)
+    monkeypatch.setattr(cli, "AUTO_EMBED_THRESHOLD", 5)
+
+    code = cli.main(["--config", str(cfg), "index"])
+    assert code == 0
+    err = capsys.readouterr().err
+
+    from claude_recall import storage
+    conn = storage.open_db(db_path)
+    try:
+        vec_count = conn.execute(
+            "SELECT COUNT(*) FROM message_vectors"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert vec_count == 0, (
+        f"auto-embed fired despite tail exceeding threshold: vec_count={vec_count}"
+    )
+    assert "exceed auto-embed threshold" in err, (
+        f"hint not printed: stderr={err!r}"
+    )
+
+
+def test_index_does_not_auto_embed_when_embeddings_disabled(
+    tmp_path, capsys, monkeypatch
+):
+    """Issue #23: if [embeddings].enabled is false, index is a no-op on
+    the embed front regardless of how many new messages there are.
+    """
+    archive_root = _seed_archive(tmp_path)
+    db_path = tmp_path / "index.db"
+    # Default config has embeddings.enabled = false (no [embeddings] section)
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        f'[archive]\nroot = "{archive_root.as_posix()}"\n'
+        f'[database]\npath = "{db_path.as_posix()}"\n',
+        encoding="utf-8",
+    )
+
+    code = cli.main(["--config", str(cfg), "index"])
+    assert code == 0
+
+    from claude_recall import storage
+    conn = storage.open_db(db_path)
+    try:
+        # message_vectors table exists but should be empty.
+        vec_count = conn.execute(
+            "SELECT COUNT(*) FROM message_vectors"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert vec_count == 0
+
+
 def test_embed_is_incremental_on_second_run(tmp_path, capsys, monkeypatch):
     """Second embed is a no-op when all messages are already embedded."""
     archive_root = _seed_archive(tmp_path)
@@ -1630,9 +1760,11 @@ def test_status_agent_context_hints_when_unembedded(tmp_path, capsys, monkeypatc
     cfg = _enable_embeddings_cfg(tmp_path, archive_root, db_path)
     _use_fake_ollama(monkeypatch, _FakeOllama())
 
-    cli.main(["--config", str(cfg), "index"])
+    # Issue #23 (v0.6.6): index now auto-embeds small tails. Pass
+    # --no-embed to deliberately leave vectors empty so we can exercise
+    # the "vectors are missing → status hints embed" assertion.
+    cli.main(["--config", str(cfg), "index", "--no-embed"])
     capsys.readouterr()
-    # deliberately skip embed
 
     cli.main(["--config", str(cfg), "status", "--format", "agent-context"])
     out = capsys.readouterr().out

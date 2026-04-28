@@ -8,7 +8,13 @@
 $ErrorActionPreference = 'SilentlyContinue'
 
 try {
-    & claude-recall index 2>$null | Out-Null
+    # Issue #23 (v0.6.6): pass --no-embed because index now auto-embeds
+    # small tails when embeddings are enabled. SessionStart fires on
+    # every Claude Code session open; we can't afford a synchronous
+    # Ollama round-trip in the session-start latency budget. The user's
+    # next manual `claude-recall index` (or the next embed-stale warning
+    # from `status`) handles embed instead.
+    & claude-recall index --no-embed 2>$null | Out-Null
 } catch {
     # Swallow. Index failures should not block session start.
 }
