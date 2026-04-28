@@ -7,6 +7,7 @@ import json
 import os
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -177,6 +178,106 @@ def test_parse_jsonl_line_tool_only_content_returns_none_by_default():
     msg = indexer.parse_jsonl_line(line, index_tool_blocks=True)
     assert msg is not None
     assert "tool_result" in msg["content"]
+
+
+def test_indexer_recovers_legacy_subagent_layout(tmp_path, db_conn):
+    """Issue #24 (v0.6.7): older Claude Code versions stored session
+    content as nested JSONLs under `<slug>/<session-uuid>/subagents/
+    agent-*.jsonl` instead of the modern flat `<slug>/<uuid>.jsonl`
+    layout. The indexer's file scan was top-level only (`glob`), so
+    legacy archives were invisible. v0.6.7 switches to `rglob` and
+    derives a path-aware synthetic session_id so each agent file
+    becomes its own retrievable session without PK-colliding.
+    """
+    import shutil as _shutil
+    archive_root = tmp_path / "archive"
+    project = archive_root / "test-project-legacy"
+    project.mkdir(parents=True)
+    # Copy the fixture's nested layout under test-project-legacy.
+    src = (
+        Path(__file__).parent / "fixtures" / "legacy_session_layout"
+        / "parent-session-uuid-aaa"
+    )
+    dst = project / "parent-session-uuid-aaa"
+    _shutil.copytree(src, dst)
+
+    report = indexer.run_index(db_conn, archive_root)
+
+    # Both agent JSONLs got indexed as separate sessions with synthetic
+    # session_ids derived from the path.
+    assert report.new_sessions == 2, (
+        f"expected 2 sessions from 2 agent JSONLs, got {report.new_sessions}"
+    )
+
+    sessions = db_conn.execute(
+        "SELECT session_id FROM sessions WHERE project_slug=? ORDER BY session_id",
+        ("test-project-legacy",),
+    ).fetchall()
+    session_ids = [r["session_id"] for r in sessions]
+    assert session_ids == [
+        "parent-session-uuid-aaa--subagents--agent-aaa111",
+        "parent-session-uuid-aaa--subagents--agent-bbb222",
+    ], f"unexpected synthetic session_ids: {session_ids!r}"
+
+    # Content was parsed and inserted (2 messages per agent file = 4 total).
+    msg_count = db_conn.execute(
+        "SELECT COUNT(*) FROM messages m "
+        "JOIN sessions s ON s.session_id = m.session_id "
+        "WHERE s.project_slug=?",
+        ("test-project-legacy",),
+    ).fetchone()[0]
+    assert msg_count == 4
+
+    # The actual content survived parsing — semantic recall would now find it.
+    has_warmup = db_conn.execute(
+        "SELECT 1 FROM messages WHERE content = ? LIMIT 1",
+        ("warmup",),
+    ).fetchone() is not None
+    has_hibernation = db_conn.execute(
+        "SELECT 1 FROM messages WHERE content = ? LIMIT 1",
+        ("hibernation discussion",),
+    ).fetchone() is not None
+    assert has_warmup, "warmup content from agent-aaa111 missing"
+    assert has_hibernation, "hibernation content from agent-bbb222 missing"
+
+
+def test_indexer_handles_mixed_legacy_and_modern_in_same_project(
+    tmp_path, db_conn
+):
+    """A project can have both modern flat-layout JSONLs at the project
+    root AND legacy nested JSONLs in subdirectories. v0.6.7's rglob
+    finds both.
+    """
+    import shutil as _shutil
+    archive_root = tmp_path / "archive"
+    project = archive_root / "mixed-project"
+    project.mkdir(parents=True)
+    # Modern flat-layout: copy session_short fixture to root.
+    _shutil.copy(
+        Path(__file__).parent / "fixtures" / "session_short.jsonl",
+        project / "modern-session-uuid.jsonl",
+    )
+    # Legacy nested-layout under same project.
+    legacy_src = (
+        Path(__file__).parent / "fixtures" / "legacy_session_layout"
+        / "parent-session-uuid-aaa"
+    )
+    _shutil.copytree(legacy_src, project / "parent-session-uuid-aaa")
+
+    report = indexer.run_index(db_conn, archive_root)
+
+    # 1 modern + 2 legacy = 3 sessions
+    assert report.new_sessions == 3
+
+    session_ids = sorted(
+        r["session_id"] for r in db_conn.execute(
+            "SELECT session_id FROM sessions WHERE project_slug=?",
+            ("mixed-project",),
+        ).fetchall()
+    )
+    assert "modern-session-uuid" in session_ids
+    assert any("agent-aaa111" in sid for sid in session_ids)
+    assert any("agent-bbb222" in sid for sid in session_ids)
 
 
 def test_session_timestamps_recorded(archive_dir, db_conn):

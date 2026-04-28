@@ -2,6 +2,82 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.6.7 — 2026-04-28
+
+Closes [#24](https://github.com/LearnedGeek/claude-recall/issues/24):
+the indexer now recovers session content from legacy Claude Code
+archive layouts. Older Claude Code versions stored sessions as
+`<slug>/<session-uuid>/subagents/agent-*.jsonl` (nested) instead of
+the modern flat `<slug>/<session-uuid>.jsonl` layout. claude-recall's
+file scan was top-level only, so the legacy content was silently
+invisible to recall. v0.6.7 picks it up.
+
+### Why
+
+Discovered when OC opened SpanishScheduler — a project predating the
+flat-layout migration — and noticed Claude Code's sidebar showed no
+history despite the archive directory containing 7 session UUIDs each
+with multiple agent JSONLs (~10MB+ of real session content). Modern
+Claude Code's UI also can't show that history; claude-recall couldn't
+either. After v0.6.7, claude-recall surfaces it for cross-session
+recall even when Claude Code's UI doesn't.
+
+### Behavior
+
+- Indexer file scan: `pdir.glob("*.jsonl")` → `pdir.rglob("*.jsonl")`
+  (recursive). Picks up both modern flat and legacy nested layouts.
+- `session_id` derivation: previously `file_path.stem` for every file.
+  Now path-aware via new `_derive_session_id` helper:
+  - Modern flat (`<slug>/<uuid>.jsonl`) → unchanged: stem-based
+    session_id matches the in-file `sessionId`, preserving every
+    invariant existing users rely on.
+  - Legacy nested → synthesized from path:
+    `<parent-uuid>--subagents--agent-<hash>`. Each agent JSONL becomes
+    its own retrievable session in claude-recall's index. Hierarchy
+    is flattened in the schema, but the *content* is recoverable —
+    which is the whole point.
+
+### Migration
+
+```
+pip install --upgrade claude-recall
+claude-recall index   # picks up legacy archives on next scan
+```
+
+No schema migration. No re-embed required (legacy content gets
+embedded via the v0.6.6 auto-embed pass on first index, or via
+manual `claude-recall embed` for tails over the threshold).
+
+For OC's SpanishScheduler specifically: ~7 parent-session UUIDs ×
+~5-15 agent JSONLs each = ~40-100 new "sessions" appearing in
+`claude-recall list` after first index. Each agent's content becomes
+independently retrievable.
+
+### Risks
+
+False positives on `*.jsonl` files nested in a project's archive dir
+that aren't Claude Code sessions (debug dumps, accidental cache
+files). The parser is defensive — non-conformant lines bump
+`malformed_lines` and are skipped. Worst case: cosmetic noise in the
+malformed counter. No data corruption.
+
+Existing users with modern flat-layout-only archives: zero behavior
+change. `rglob` finds the same files `glob` did.
+
+### Tests
+
+- New fixture: `tests/fixtures/legacy_session_layout/` with one
+  parent-session UUID dir containing two `subagents/agent-*.jsonl`
+  files. Identical JSONL shape to modern fixtures, just nested.
+- `test_indexer_recovers_legacy_subagent_layout` — index a legacy
+  layout, assert two synthetic-id session rows created, content
+  parsed and inserted, both agent JSONLs' actual content findable.
+- `test_indexer_handles_mixed_legacy_and_modern_in_same_project` —
+  one project with both modern flat AND legacy nested layouts; assert
+  3 sessions indexed (1 modern + 2 legacy).
+
+182 Python tests pass; 62 C# tests pass; AOT binary builds clean.
+
 ## v0.6.6 — 2026-04-28
 
 Closes [#23](https://github.com/LearnedGeek/claude-recall/issues/23):

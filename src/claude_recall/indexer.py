@@ -78,7 +78,12 @@ def run_index(
 
     for pdir in project_dirs:
         slug = pdir.name
-        files = sorted(pdir.glob("*.jsonl"))
+        # Issue #24 (v0.6.7): rglob instead of glob so the indexer finds
+        # JSONLs nested under legacy Claude Code session-storage layouts
+        # (`<slug>/<session-uuid>/subagents/agent-*.jsonl`) in addition to
+        # the modern flat `<slug>/<uuid>.jsonl` layout. The parser handles
+        # both formats identically — only file discovery needed updating.
+        files = sorted(pdir.rglob("*.jsonl"))
         if verbose:
             print(
                 f"[indexer] {slug}: {len(files)} session file(s)",
@@ -89,6 +94,7 @@ def run_index(
                 conn,
                 jsonl_path,
                 slug,
+                project_dir=pdir,
                 rebuild=rebuild,
                 index_tool_blocks=index_tool_blocks,
                 verbose=verbose,
@@ -136,10 +142,31 @@ def run_index(
     return report
 
 
+def _derive_session_id(jsonl_path: Path, project_dir: Path) -> str:
+    """Path-aware session_id so legacy nested archives don't PK-collide.
+
+    Modern flat layout (`<slug>/<uuid>.jsonl`) → returns just the stem,
+    preserving v0.6.x behavior. Legacy nested layout (e.g.,
+    `<slug>/<parent-uuid>/subagents/agent-<hash>.jsonl`) → returns a
+    path-derived synthetic ID (`<parent-uuid>--subagents--agent-<hash>`)
+    so each agent file gets its own row without colliding on session_id
+    PK or file_path UNIQUE constraints. Issue #24 (v0.6.7).
+    """
+    try:
+        rel = jsonl_path.relative_to(project_dir)
+    except ValueError:
+        return jsonl_path.stem
+    parts = rel.parts
+    if len(parts) == 1:
+        return jsonl_path.stem
+    return "--".join(list(parts[:-1]) + [jsonl_path.stem])
+
+
 def _index_file(
     conn: sqlite3.Connection,
     file_path: Path,
     project_slug: str,
+    project_dir: Path,
     rebuild: bool,
     index_tool_blocks: bool,
     verbose: bool,
@@ -198,7 +225,7 @@ def _index_file(
         report.malformed_lines += malformed
         new_hashes = [content_hash(m["content"]) for m in messages]
 
-        session_id = file_path.stem
+        session_id = _derive_session_id(file_path, project_dir)
         now_iso = datetime.now(UTC).isoformat()
 
         existing = conn.execute(
