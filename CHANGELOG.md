@@ -2,6 +2,63 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.7.1 — 2026-04-29
+
+Time-windowing for `claude-recall topics`. Adds `--since <date>` so the
+same clustering machinery can scope to a week, a month, or the full
+archive. This ships **feature 2** of the v0.7 plan; feature 3
+(cross-project boost in semantic search) lands as v0.7.2.
+
+### `--since` accepts ISO dates and shorthand
+
+```bash
+claude-recall topics --since 2026-04-01 --limit 20    # ISO date
+claude-recall topics --since 7d                       # last 7 days
+claude-recall topics --since 4w                       # last 4 weeks
+claude-recall topics --since 6m                       # ~last 6 months
+claude-recall topics --since 1y                       # ~last year
+```
+
+Shorthand units: `d` (days), `w` (weeks=7d), `m` (months=30d),
+`y` (years=365d). Calendar-precise month/year math is intentionally
+overkill for "what's bubbling lately" mining — the rough-day
+arithmetic is fine for the use case.
+
+Filter semantics mirror the `--days` predicate fix from issue #13:
+the cutoff applies to **per-message timestamps**, not per-session
+start times. A 5,000-turn session that started a year ago still
+contributes its recent messages to a `--since 7d` window. Uses the
+existing `idx_messages_timestamp` index — no schema change.
+
+Messages with `NULL` timestamps (rare; pre-v0.6 archive rows) are
+excluded from any `--since` window — they can't be confidently dated,
+so silent inclusion would be the wrong default.
+
+### Output
+
+The text-format header now surfaces the cutoff so the scope is
+visible at a glance:
+
+```
+clustered 1,847 messages into 23 themes (noise: 412), since: 2026-04-01
+```
+
+JSON output includes the cutoff in the `since` field as a full ISO
+timestamp.
+
+### Errors
+
+`--since garbage` exits with code 2 (argparse-style usage error) and
+a message naming both accepted formats. The CLI distinguishes this
+from runtime failures (exit 1) — bad input is the user's mistake, not
+a system problem to retry.
+
+### Migration
+
+Strictly additive. `topics` invocations without `--since` behave
+identically to v0.7.0 (full archive). No schema change, no re-embed,
+no hook reinstall.
+
 ## v0.7.0 — 2026-04-29
 
 First-class thematic mining. Adds `claude-recall topics` — a new

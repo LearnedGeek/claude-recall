@@ -74,6 +74,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Scope to one project slug, or 'auto' to use cwd's slug.",
     )
     p_topics.add_argument(
+        "--since",
+        help=(
+            "Time-window the input set. Accepts ISO date (2026-04-01), "
+            "ISO datetime, or shorthand (7d, 4w, 6m, 1y)."
+        ),
+    )
+    p_topics.add_argument(
         "--format", choices=["json", "text", "agent-context"], default="text",
     )
 
@@ -416,12 +423,22 @@ def _cmd_topics(args: argparse.Namespace, cfg: Config) -> int:
         project_slug = projects.resolve_project_slug(conn)
 
     try:
+        since = _topics.parse_since(args.since)
+    except _topics.TopicsError as exc:
+        # Bad --since input is a CLI usage error, not a runtime failure;
+        # exit 2 matches argparse-style usage-error convention.
+        print(str(exc), file=sys.stderr)
+        conn.close()
+        return 2
+
+    try:
         response = _topics.run_topics(
             conn,
             project_slug=project_slug,
             similarity_threshold=args.similarity_threshold,
             min_cluster_size=args.min_cluster_size,
             limit=args.limit,
+            since=since,
         )
     except _topics.TopicsError as exc:
         print(str(exc), file=sys.stderr)

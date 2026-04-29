@@ -332,6 +332,158 @@ def test_topics_agent_context_empty_when_no_themes(db_conn):
     assert topics.format_topics(response, format="agent-context") == "{}"
 
 
+def test_topics_since_iso_date_windows_input_to_recent_messages(db_conn):
+    """`--since 2026-04-01` should drop messages timestamped before the cutoff
+    from the input set before clustering. This isolates the time filter — five
+    messages from January and five from late April; only the late-April set
+    should make it into a theme."""
+    from datetime import UTC, datetime
+    next_id = 1
+    # Old set: January messages, basis 0.
+    for variant in range(5):
+        v = _cluster_at(0, dim=8, seed=variant)
+        _seed_message(
+            db_conn,
+            msg_id=next_id,
+            session_id=f"old-{variant}",
+            project_slug="proj-A",
+            content=f"old message {variant}",
+            vector=v,
+            started_at=f"2026-01-{15 + variant:02d}T12:00:00+00:00",
+        )
+        next_id += 1
+    # Recent set: late-April messages, basis 1 (different cluster).
+    for variant in range(5):
+        v = _cluster_at(1, dim=8, seed=100 + variant)
+        _seed_message(
+            db_conn,
+            msg_id=next_id,
+            session_id=f"new-{variant}",
+            project_slug="proj-B",
+            content=f"new message {variant}",
+            vector=v,
+            started_at=f"2026-04-{20 + variant:02d}T12:00:00+00:00",
+        )
+        next_id += 1
+
+    cutoff = datetime(2026, 4, 1, tzinfo=UTC)
+    response = topics.run_topics(
+        db_conn, since=cutoff,
+        similarity_threshold=0.5, min_cluster_size=3,
+    )
+
+    assert response.total_messages_clustered == 5, (
+        f"expected only the 5 post-cutoff messages, got "
+        f"{response.total_messages_clustered}"
+    )
+    assert response.total_clusters == 1
+    assert response.themes[0].project_slugs == ["proj-B"]
+    assert response.since == cutoff.isoformat()
+
+
+def test_topics_since_shorthand_30d_equivalent_to_iso(db_conn):
+    """`parse_since('30d')` should yield the same cutoff as 30 days before
+    the reference time. Pinning `now` keeps the test deterministic."""
+    from datetime import UTC, datetime, timedelta
+    fixed_now = datetime(2026, 4, 29, 12, 0, 0, tzinfo=UTC)
+    via_shorthand = topics.parse_since("30d", now=fixed_now)
+    via_iso = topics.parse_since("2026-03-30T12:00:00+00:00", now=fixed_now)
+    assert via_shorthand == fixed_now - timedelta(days=30)
+    # Same calendar instant, just different spellings.
+    assert via_shorthand == via_iso
+
+
+def test_topics_since_invalid_format_raises_actionable_error(db_conn):
+    """`--since garbage` should raise TopicsError with both accepted
+    formats named in the message — caller (CLI) maps to exit 2."""
+    with pytest.raises(topics.TopicsError) as excinfo:
+        topics.parse_since("garbage")
+    msg = str(excinfo.value)
+    assert "ISO" in msg, f"actionable error must name ISO format: {msg!r}"
+    assert "shorthand" in msg.lower(), (
+        f"actionable error must name shorthand format: {msg!r}"
+    )
+
+
+def test_topics_since_excludes_null_timestamp_messages(db_conn):
+    """Messages whose timestamp is NULL (pre-v0.6 archive rows) fall outside
+    any --since window — we can't confidently date them, so they're excluded
+    rather than silently included or excluded depending on SQL operator
+    semantics."""
+    next_id = 1
+    # Two messages with explicit recent timestamps.
+    for variant in range(2):
+        v = _cluster_at(0, dim=8, seed=variant)
+        _seed_message(
+            db_conn,
+            msg_id=next_id,
+            session_id=f"dated-{variant}",
+            project_slug="proj-A",
+            content=f"dated message {variant}",
+            vector=v,
+            started_at="2026-04-25T12:00:00+00:00",
+        )
+        next_id += 1
+    # Two messages with NULL timestamp (manually patched after seeding).
+    for variant in range(2):
+        v = _cluster_at(0, dim=8, seed=10 + variant)
+        _seed_message(
+            db_conn,
+            msg_id=next_id,
+            session_id=f"undated-{variant}",
+            project_slug="proj-A",
+            content=f"undated message {variant}",
+            vector=v,
+            started_at="2026-04-25T12:00:00+00:00",
+        )
+        db_conn.execute(
+            "UPDATE messages SET timestamp = NULL WHERE msg_id = ?", (next_id,)
+        )
+        db_conn.commit()
+        next_id += 1
+
+    from datetime import UTC, datetime
+    cutoff = datetime(2026, 4, 1, tzinfo=UTC)
+    response = topics.run_topics(
+        db_conn, since=cutoff, min_cluster_size=2, similarity_threshold=0.5,
+    )
+
+    assert response.total_messages_clustered == 2, (
+        f"NULL-timestamp messages should be excluded from a --since window, "
+        f"got total_messages_clustered={response.total_messages_clustered}"
+    )
+
+
+def test_topics_since_text_format_header_shows_cutoff_date(db_conn):
+    """The text format header should surface `since: YYYY-MM-DD` so users
+    immediately see what window they're looking at."""
+    next_id = 1
+    for variant in range(4):
+        v = _cluster_at(0, dim=8, seed=variant)
+        _seed_message(
+            db_conn,
+            msg_id=next_id,
+            session_id=f"sess-{variant}",
+            project_slug="proj-A",
+            content=f"recent message {variant}",
+            vector=v,
+            started_at="2026-04-25T12:00:00+00:00",
+        )
+        next_id += 1
+
+    from datetime import UTC, datetime
+    response = topics.run_topics(
+        db_conn,
+        since=datetime(2026, 4, 1, tzinfo=UTC),
+        similarity_threshold=0.5,
+        min_cluster_size=3,
+    )
+    text = topics.format_topics(response, format="text")
+    assert "since: 2026-04-01" in text, (
+        f"text header missing 'since:' field: {text!r}"
+    )
+
+
 def test_topics_project_filter_scopes_clustering(db_conn):
     """`--project <slug>` filters input messages to one project before
     clustering. Other projects' messages don't contribute."""

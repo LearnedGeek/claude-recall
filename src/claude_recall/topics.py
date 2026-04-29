@@ -45,6 +45,7 @@ import math
 import re
 import sqlite3
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime, timedelta
 
 DEFAULT_SIMILARITY_THRESHOLD = 0.75
 DEFAULT_MIN_CLUSTER_SIZE = 4
@@ -55,9 +56,52 @@ PREVIEW_CHARS = 200
 
 _TOKEN_PATTERN = re.compile(r"[a-z][a-z0-9]+")
 
+# v0.7.1 --since: shorthand `\d+[dwmy]` (days/weeks/months/years). Months
+# resolve to 30 days, years to 365 days — calendar-precise quarter math is
+# overkill for "what's bubbling lately" mining.
+_SHORTHAND_PATTERN = re.compile(r"^(\d+)([dwmy])$")
+_SHORTHAND_DAYS = {"d": 1, "w": 7, "m": 30, "y": 365}
+
 
 class TopicsError(RuntimeError):
     """Raised for terminal failures the CLI should catch and exit on."""
+
+
+def parse_since(spec: str | None, *, now: datetime | None = None) -> datetime | None:
+    """Parse a --since value into a UTC datetime cutoff.
+
+    Accepts: ``None`` (no cutoff), ISO date (``2026-04-01``), ISO datetime
+    (``2026-04-01T12:00:00``), or shorthand (``7d``, ``4w``, ``6m``, ``1y``).
+    Raises :class:`TopicsError` with both accepted formats listed when the
+    input matches neither — caller (CLI) translates to exit 2.
+    """
+    if spec is None:
+        return None
+    text = spec.strip()
+    if not text:
+        return None
+
+    shorthand_match = _SHORTHAND_PATTERN.match(text.lower())
+    if shorthand_match:
+        amount = int(shorthand_match.group(1))
+        unit = shorthand_match.group(2)
+        days = amount * _SHORTHAND_DAYS[unit]
+        ref = now or datetime.now(UTC)
+        return ref - timedelta(days=days)
+
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise TopicsError(
+            f"--since: cannot parse {spec!r}. Accepted formats: "
+            f"ISO date (e.g., 2026-04-01), ISO datetime (e.g., "
+            f"2026-04-01T12:00:00), or shorthand (e.g., 7d, 4w, 6m, 1y)."
+        ) from exc
+    # Naive datetimes (date-only) are treated as UTC midnight to keep the
+    # downstream comparison against `messages.timestamp` (ISO with tz) coherent.
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
 
 
 @dataclass
@@ -97,6 +141,7 @@ def run_topics(
     similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
     min_cluster_size: int = DEFAULT_MIN_CLUSTER_SIZE,
     limit: int = DEFAULT_LIMIT,
+    since: datetime | None = None,
 ) -> TopicsResponse:
     """Cluster the embedded archive and return ranked themes.
 
@@ -106,6 +151,11 @@ def run_topics(
     against mid-flight model swaps — same shape ``_semantic_rerank``
     already uses). Clusters via single-link agglomerative on cosine.
     Returns ``TopicsResponse`` with themes sorted by descending score.
+
+    ``since`` (v0.7.1): when set, filters to messages whose ``timestamp``
+    is on or after the cutoff. Mirrors the per-message semantics issue #13
+    settled for ``search --days`` — uses the ``idx_messages_timestamp``
+    index added in v0.6.0.
     """
     try:
         from . import embeddings as _emb
@@ -117,18 +167,28 @@ def run_topics(
     import numpy as np
 
     sql = """
-        SELECT m.msg_id, m.content, m.turn_index, m.role,
+        SELECT m.msg_id, m.content, m.turn_index, m.role, m.timestamp,
                s.session_id, s.project_slug, s.started_at,
                v.vector, v.dim
         FROM message_vectors v
         JOIN messages m ON m.msg_id = v.msg_id
         JOIN sessions s ON s.session_id = m.session_id
     """
+    where_clauses: list[str] = []
     params: list = []
     if project_slug:
-        sql += " WHERE LOWER(s.project_slug) = LOWER(?)"
+        where_clauses.append("LOWER(s.project_slug) = LOWER(?)")
         params.append(project_slug)
+    if since is not None:
+        # NULL timestamps fall outside the window — they predate v0.6's
+        # per-message timestamp capture and can't be confidently dated.
+        where_clauses.append("m.timestamp IS NOT NULL AND m.timestamp >= ?")
+        params.append(since.isoformat())
+    if where_clauses:
+        sql += " WHERE " + " AND ".join(where_clauses)
     sql += " ORDER BY m.msg_id"
+
+    since_iso = since.isoformat() if since is not None else None
 
     rows = conn.execute(sql, params).fetchall()
     if not rows:
@@ -138,6 +198,7 @@ def run_topics(
             noise_count=0,
             themes=[],
             project_slug=project_slug,
+            since=since_iso,
         )
 
     expected_dim = int(rows[0]["dim"])
@@ -160,6 +221,7 @@ def run_topics(
             noise_count=0,
             themes=[],
             project_slug=project_slug,
+            since=since_iso,
         )
 
     vectors = np.stack(vectors_list).astype(np.float32)
@@ -235,6 +297,7 @@ def run_topics(
             noise_count=noise_count,
             themes=[],
             project_slug=project_slug,
+            since=since_iso,
         )
 
     # TF-IDF cluster labels.
@@ -314,6 +377,7 @@ def run_topics(
         noise_count=noise_count,
         themes=themes,
         project_slug=project_slug,
+        since=since_iso,
     )
 
 
@@ -358,6 +422,11 @@ def _format_text(response: TopicsResponse) -> str:
         f"into {response.total_clusters} themes "
         f"(noise: {response.noise_count})"
     ]
+    if response.since:
+        # Surface the cutoff in the user-visible header — date alone is
+        # the readable form (full ISO datetime in the JSON output for
+        # programmatic consumers).
+        header_parts.append(f"since: {response.since[:10]}")
     if response.project_slug:
         header_parts.append(f"scope: project={response.project_slug}")
     lines = [", ".join(header_parts), ""]
