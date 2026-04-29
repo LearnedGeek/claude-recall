@@ -30,6 +30,14 @@ from .config import Config, load_config
 # cascade situations.
 EMBED_COVERAGE_THRESHOLD = 0.95
 
+# Issue #26 (v0.6.8): explicit marker embedded in every claude-recall-emitted
+# hook command. Replaces the older filename-fragment heuristic as the primary
+# identification mechanism — necessary for hooks that don't reference any
+# claude-recall path (e.g., the inline-PowerShell time-injection hook).
+# Defined at module scope (before any init-hooks constants) so TIME_HOOK_COMMAND
+# can interpolate it at module-load time.
+_CLAUDE_RECALL_MARKER = "[claude-recall managed]"
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -1215,6 +1223,23 @@ NATIVE_SRC_DIR = Path(__file__).resolve().parent / "native"
 SETTINGS_FILENAME = "settings.json"
 HOOK_VERSION_FILENAME = ".claude-recall-version"
 
+# Issue #26 (v0.6.8): inline PowerShell expression that injects current local
+# time as additionalContext on every UserPromptSubmit. Solves Claude's
+# chronic temporal-drift problem ("go to sleep" suggestions at 2:30pm because
+# the model has no ground-truth time). Emitted only when [hooks].inject_time
+# is true. The leading `$null = '[claude-recall managed]'` is a discarded
+# variable assignment — no execution side-effect, but a clear marker the
+# strip function uses to identify this as ours (so flipping inject_time off
+# and re-running --force removes it cleanly without touching any user-added
+# time hooks that lack the marker).
+TIME_HOOK_COMMAND = (
+    f"$null = '{_CLAUDE_RECALL_MARKER}'; "
+    "@{hookSpecificOutput = @{hookEventName = 'UserPromptSubmit'; "
+    "additionalContext = 'Current local time: ' + "
+    "(Get-Date -Format 'dddd yyyy-MM-dd HH:mm zzz')}} "
+    "| ConvertTo-Json -Compress"
+)
+
 
 def _native_hook_binary() -> Path | None:
     """Return the path to the bundled C# hook binary if the wheel shipped one.
@@ -1315,7 +1340,13 @@ def _cmd_init_hooks(args: argparse.Namespace, cfg: Config) -> int:
         sidecar = NATIVE_SRC_DIR / "e_sqlite3.dll"
         if sidecar.is_file():
             shutil.copyfile(sidecar, hooks_dir / "e_sqlite3.dll")
-        on_prompt_cmd = str(exe_dst)
+        # Issue #26 (v0.6.8): append the --__cr-managed marker flag so the
+        # strip function can identify this command as ours via marker match
+        # (canonical) instead of relying on the filename-fragment fallback.
+        # The binary's CliArgs.Parse silently ignores unknown flags, so this
+        # is a no-op at execution time but a clear marker in the command
+        # string for our scanner.
+        on_prompt_cmd = f"{exe_dst} --__cr-managed"
     else:
         _copy_if_present(
             on_prompt_src, hooks_dir / on_prompt_name,
@@ -1357,6 +1388,20 @@ def _cmd_init_hooks(args: argparse.Namespace, cfg: Config) -> int:
     if session_start_cmd is not None:
         _merge_hook(hooks_block, "SessionStart", session_start_cmd, matcher="startup|resume")
     _merge_hook(hooks_block, "UserPromptSubmit", on_prompt_cmd, matcher=None)
+
+    # Issue #26 (v0.6.8): emit the time-injection hook when opted in via
+    # [hooks].inject_time. The marker embedded in the command lets a future
+    # `init-hooks --force` (with the flag flipped to false, or just on a
+    # routine refresh) remove or re-emit cleanly without touching any
+    # user-added time hooks that lack the marker.
+    if cfg.hooks.inject_time:
+        _merge_hook(
+            hooks_block,
+            "UserPromptSubmit",
+            TIME_HOOK_COMMAND,
+            matcher=None,
+            shell="powershell",
+        )
 
     settings_path.write_text(
         json.dumps(settings, indent=2) + "\n", encoding="utf-8"
@@ -1531,6 +1576,10 @@ def _read_installed_hook_version(project_root: Path | None = None) -> str | None
         return None
 
 
+# Issue #26 (v0.6.8): _CLAUDE_RECALL_MARKER is defined at module-scope top
+# (so TIME_HOOK_COMMAND can interpolate it). The fragment list below stays
+# as a fallback so we still recognize hooks emitted by pre-v0.6.8 versions
+# that don't have the marker.
 _CLAUDE_RECALL_OWNED_FRAGMENTS = (
     "claude-recall-hook",  # v0.4+ NativeAOT binary (Windows .exe + future)
     "session_start.ps1",   # SessionStart on Windows
@@ -1541,15 +1590,22 @@ _CLAUDE_RECALL_OWNED_FRAGMENTS = (
 
 
 def _is_claude_recall_command(command: object) -> bool:
-    """Heuristic: is this command path one claude-recall placed?
+    """Identify hooks claude-recall emitted (vs hooks the user added manually).
 
-    We match by filename fragment rather than absolute path because
-    install paths shift across versions (site-packages → .claude/hooks/,
-    drive letters change, etc.). The fragment list covers every shape
-    init-hooks has ever emitted.
+    Marker-first, fragments-fallback. Marker is the canonical identification
+    going forward; fragments are kept for backward compat with hooks emitted
+    by pre-v0.6.8 versions (no marker present). Pre-v0.6.8 users who upgrade
+    and `init-hooks --force` get their hooks rewritten with markers — no
+    functional change, just additive metadata.
+
+    Load-bearing principle (issue #26): claude-recall NEVER touches a hook
+    command it didn't emit. User-added hooks (no marker, no claude-recall
+    fragment) pass through every `--force` cycle untouched.
     """
     if not isinstance(command, str):
         return False
+    if _CLAUDE_RECALL_MARKER in command:
+        return True
     return any(frag in command for frag in _CLAUDE_RECALL_OWNED_FRAGMENTS)
 
 
@@ -1599,7 +1655,11 @@ def _strip_claude_recall_commands(hooks_block: dict, event: str) -> None:
 
 
 def _merge_hook(
-    hooks_block: dict, event: str, command: str, matcher: str | None
+    hooks_block: dict,
+    event: str,
+    command: str,
+    matcher: str | None,
+    shell: str | None = None,
 ) -> None:
     """Insert a hook entry unless one with the same command already exists.
 
@@ -1609,7 +1669,9 @@ def _merge_hook(
     rejected by the parser with "Expected array, but received undefined" and
     silently disables the host project's settings as a side effect. Bash —
     the default hook shell — also can't execute a raw `.ps1` path, so add
-    `shell: "powershell"` when the command points at one.
+    `shell: "powershell"` when the command points at one (or pass `shell`
+    explicitly for inline expressions like the time-injection hook from
+    issue #26).
     """
     entries = hooks_block.setdefault(event, [])
     if not isinstance(entries, list):
@@ -1624,7 +1686,9 @@ def _merge_hook(
             ):
                 return
     cmd_entry: dict = {"type": "command", "command": command}
-    if command.lower().endswith(".ps1"):
+    if shell is not None:
+        cmd_entry["shell"] = shell
+    elif command.lower().endswith(".ps1"):
         cmd_entry["shell"] = "powershell"
     entry: dict = {"hooks": [cmd_entry]}
     if matcher is not None:

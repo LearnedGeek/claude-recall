@@ -57,12 +57,25 @@ class EmbeddingsConfig:
 
 
 @dataclass
+class HooksConfig:
+    # Issue #26 (v0.6.8): when true, init-hooks emits a sibling
+    # UserPromptSubmit hook that injects the current local time as
+    # additionalContext. Solves Claude's chronic temporal-drift problem
+    # (suggesting "go to sleep" at 2:30pm because the model has no
+    # ground-truth time). Default false — opt-in only. Marker-identified
+    # so init-hooks --force can preserve, update, or remove cleanly
+    # without touching any user-managed sibling hooks.
+    inject_time: bool = False
+
+
+@dataclass
 class Config:
     archive_root: Path = field(default_factory=lambda: Path.home() / ".claude" / "projects")
     db_path: Path = field(default_factory=lambda: default_db_path())
     search: SearchConfig = field(default_factory=SearchConfig)
     indexing: IndexingConfig = field(default_factory=IndexingConfig)
     embeddings: EmbeddingsConfig = field(default_factory=EmbeddingsConfig)
+    hooks: HooksConfig = field(default_factory=HooksConfig)
 
 
 def default_config_path() -> Path:
@@ -131,6 +144,10 @@ def _load_toml(path: Path) -> Config:
         val = _dig(data, "embeddings", field_name)
         if val is not None:
             setattr(cfg.embeddings, field_name, val)
+
+    inject_time = _dig(data, "hooks", "inject_time")
+    if inject_time is not None:
+        cfg.hooks.inject_time = bool(inject_time)
 
     return cfg
 

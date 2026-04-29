@@ -2,6 +2,123 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.6.8 — 2026-04-29
+
+Closes [#26](https://github.com/LearnedGeek/claude-recall/issues/26):
+adds an opt-in `[hooks].inject_time` config setting that emits a
+time-injection hook alongside claude-recall's managed hooks. Eliminates
+the manual copy-paste step OC was doing across 9+ projects, and
+introduces marker-based identification of claude-recall-emitted hooks
+as a structural correctness improvement.
+
+### Why
+
+The time-injection hook fixes Claude's chronic temporal-drift problem
+("go to sleep" suggestions at 2:30pm because the model has no
+ground-truth time). It first appeared as a one-off snippet during the
+v0.6.4/v0.6.5 cycle when we discovered Claude Code's strict-validation
+pass was silently dropping the legacy top-level `additionalContext`
+form. OC adopted it across every project they use claude-recall in,
+manually pasting the wrapped-form PowerShell expression into each
+settings.json. v0.6.8 makes it a config-driven feature.
+
+### `[hooks].inject_time` config setting
+
+Default false. Opt-in:
+
+```toml
+# config.toml
+[hooks]
+inject_time = true
+```
+
+Then `claude-recall init-hooks --force` emits the time hook alongside
+claude-recall's existing UserPromptSubmit hook. The emitted command is
+the wrapped-form PowerShell expression OC has been pasting:
+
+```powershell
+$null = '[claude-recall managed]'; @{hookSpecificOutput = @{hookEventName = 'UserPromptSubmit'; additionalContext = 'Current local time: ' + (Get-Date -Format 'dddd yyyy-MM-dd HH:mm zzz')}} | ConvertTo-Json -Compress
+```
+
+Flipping `inject_time = false` and re-running `init-hooks --force`
+removes claude-recall's emitted time hook cleanly. Any user-added time
+hook (without our marker) is preserved untouched — see "load-bearing
+principle" below.
+
+Scope: Windows-only for v0.6.8. Bash variant for Unix users in a
+follow-up if asked.
+
+### Marker-based identification of claude-recall-managed hooks
+
+Pre-v0.6.8, `_is_claude_recall_command` matched by filename fragment
+(`claude-recall-hook`, `session_start.ps1`, etc.). That worked for
+binary/shell-script hooks because those paths are uniquely ours, but
+the time-injection hook is an inline PowerShell expression with no
+claude-recall path involved — fragment matching couldn't catch it.
+
+Fix: every claude-recall-emitted hook command now embeds the marker
+string `[claude-recall managed]`. The strip function checks for the
+marker first, falls back to fragment matching for backward compat with
+hooks emitted by pre-v0.6.8 versions.
+
+| Hook type | Marker shape |
+|---|---|
+| Binary invocation | `<path>\claude-recall-hook.exe --__cr-managed` (binary's CliArgs.Parse silently ignores unknown flags — no-op at execution, scannable in command string) |
+| Inline PowerShell (time hook) | `$null = '[claude-recall managed]'; @{hookSpecificOutput = ...}` (discarded variable assignment) |
+| Shell scripts (existing) | unchanged for v0.6.8 — fragment fallback still identifies them; markers can be added in a follow-up if needed |
+
+### Load-bearing principle
+
+**claude-recall NEVER touches a hook command it didn't emit, no matter
+how similar it looks to ours.** User-added hooks (no marker, no
+claude-recall fragment) pass through every `--force` cycle untouched.
+
+| Scenario | Behavior |
+|---|---|
+| `inject_time = true`, no existing time hook | Add OUR time hook (with marker). |
+| `inject_time = true`, user has existing time hook (no marker) | Add OUR time hook alongside. User ends up with both — slight redundancy, no destruction. |
+| `inject_time = false`, OUR time hook present (with marker) | Remove on next `--force`. |
+| `inject_time = false`, user time hook (no marker) | Untouched. Always. |
+
+The duplicate case (user has their own time hook AND sets
+`inject_time = true`) is the right kind of "loud problem" — user
+notices the duplicate output and decides which to keep. We don't
+dedupe because we can't safely know they're meant to be the same.
+
+### Migration
+
+```
+pip install --upgrade claude-recall
+# Add [hooks].inject_time = true to config.toml if you want the time hook managed.
+claude-recall init-hooks --force   # per project where you want it
+```
+
+Pre-v0.6.8 users with manually-pasted time hooks (OC's case across 9
+projects): the manual hook stays preserved through the upgrade. After
+running `init-hooks --force` with `inject_time = true`, both hooks are
+present (claude-recall's marked + user's unmarked). Manually delete
+the user's copy when convenient.
+
+Pre-v0.6.8 users without a time hook: nothing changes unless they
+opt-in.
+
+### Tests
+
+- `test_init_hooks_emits_marker_on_binary_invocation` — fresh init-hooks;
+  binary command in settings.json includes `--__cr-managed` flag.
+- `test_init_hooks_emits_time_hook_when_inject_time_true` — config
+  flag on; time hook present with marker, wrapped envelope shape.
+- `test_init_hooks_omits_time_hook_when_inject_time_false_default` —
+  default config; no time hook emitted.
+- `test_init_hooks_force_removes_managed_time_hook_when_flag_disabled`
+  — flip true → false + `--force`; managed time hook removed.
+- `test_init_hooks_force_preserves_user_time_hook_through_flag_cycle` —
+  load-bearing principle: user-added time hook (no marker) survives
+  every cycle of `inject_time` flipping with `--force` between each.
+
+187 Python tests pass; 62 C# tests pass; AOT binary builds clean (no
+binary changes — only the Python CLI's emitted command string changed).
+
 ## v0.6.7 — 2026-04-28
 
 Closes [#24](https://github.com/LearnedGeek/claude-recall/issues/24):

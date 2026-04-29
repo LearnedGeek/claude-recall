@@ -1242,6 +1242,191 @@ def test_init_hooks_no_warning_when_coverage_full(
     assert "vectors_coverage" not in err
 
 
+def test_init_hooks_emits_marker_on_binary_invocation(tmp_path, monkeypatch):
+    """Issue #26 (v0.6.8): the binary command in settings.json includes the
+    `--__cr-managed` marker flag so the strip function can identify it as
+    ours via marker match (canonical) instead of relying on filename-fragment
+    fallback. The binary's CliArgs.Parse silently ignores unknown flags, so
+    this is a no-op at execution but a clear marker for our scanner.
+    """
+    import sys as _sys
+    if _sys.platform != "win32":
+        pytest.skip("binary-aware init-hooks check is win-x64 only")
+
+    from claude_recall import cli as _cli
+    fake_native = tmp_path / "fake_native"
+    fake_native.mkdir()
+    (fake_native / "claude-recall-hook.exe").write_bytes(b"MZ stub")
+    monkeypatch.setattr(_cli, "NATIVE_SRC_DIR", fake_native)
+
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    code = cli.main(["init-hooks", "--project-root", str(project_root)])
+    assert code == 0
+
+    settings = json.loads(
+        (project_root / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    ups_cmds = _hook_commands(settings["hooks"]["UserPromptSubmit"])
+    binary_cmds = [c for c in ups_cmds if "claude-recall-hook" in c]
+    assert len(binary_cmds) == 1
+    assert "--__cr-managed" in binary_cmds[0], (
+        f"binary command missing marker flag: {binary_cmds[0]!r}"
+    )
+
+
+def test_init_hooks_emits_time_hook_when_inject_time_true(tmp_path):
+    """Issue #26: when [hooks].inject_time = true in config.toml, init-hooks
+    emits a UserPromptSubmit time-injection hook with the
+    `[claude-recall managed]` marker so future --force runs can identify
+    and manage it.
+    """
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(
+        "[hooks]\ninject_time = true\n",
+        encoding="utf-8",
+    )
+
+    code = cli.main([
+        "--config", str(cfg_path),
+        "init-hooks", "--project-root", str(project_root),
+    ])
+    assert code == 0
+
+    settings = json.loads(
+        (project_root / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    ups_cmds = _hook_commands(settings["hooks"]["UserPromptSubmit"])
+    time_cmds = [c for c in ups_cmds if "Current local time" in c]
+    assert len(time_cmds) == 1, (
+        f"expected exactly one time hook, got {len(time_cmds)}: {ups_cmds!r}"
+    )
+    assert "[claude-recall managed]" in time_cmds[0], (
+        f"time hook missing claude-recall marker: {time_cmds[0]!r}"
+    )
+    # Wrapped hookSpecificOutput envelope (issue #21).
+    assert "hookSpecificOutput" in time_cmds[0]
+    assert "hookEventName = 'UserPromptSubmit'" in time_cmds[0]
+
+
+def test_init_hooks_omits_time_hook_when_inject_time_false_default(tmp_path):
+    """Issue #26: with no [hooks] section in config (default), init-hooks
+    does NOT emit a time hook. The feature is opt-in.
+    """
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    code = cli.main(["init-hooks", "--project-root", str(project_root)])
+    assert code == 0
+
+    settings = json.loads(
+        (project_root / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    ups_cmds = _hook_commands(settings["hooks"]["UserPromptSubmit"])
+    assert not any("Current local time" in c for c in ups_cmds), (
+        f"time hook emitted despite inject_time=false: {ups_cmds!r}"
+    )
+
+
+def test_init_hooks_force_removes_managed_time_hook_when_flag_disabled(tmp_path):
+    """Issue #26: flipping inject_time from true to false and re-running
+    --force removes claude-recall's time hook. (User-added time hooks
+    without our marker stay untouched — see the next test.)
+    """
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+
+    # Round 1: inject_time = true — time hook gets emitted.
+    cfg_on = tmp_path / "config_on.toml"
+    cfg_on.write_text("[hooks]\ninject_time = true\n", encoding="utf-8")
+    cli.main([
+        "--config", str(cfg_on),
+        "init-hooks", "--project-root", str(project_root),
+    ])
+    settings = json.loads(
+        (project_root / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    pre_cmds = _hook_commands(settings["hooks"]["UserPromptSubmit"])
+    assert any("Current local time" in c for c in pre_cmds), (
+        f"setup failed: time hook should be present after first init: {pre_cmds!r}"
+    )
+
+    # Round 2: inject_time = false + --force — managed time hook gets removed.
+    cfg_off = tmp_path / "config_off.toml"
+    cfg_off.write_text("[hooks]\ninject_time = false\n", encoding="utf-8")
+    cli.main([
+        "--config", str(cfg_off),
+        "init-hooks", "--project-root", str(project_root), "--force",
+    ])
+    settings = json.loads(
+        (project_root / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    post_cmds = _hook_commands(settings["hooks"]["UserPromptSubmit"])
+    managed_time = [
+        c for c in post_cmds
+        if "Current local time" in c and "[claude-recall managed]" in c
+    ]
+    assert not managed_time, (
+        f"claude-recall's time hook survived inject_time=false + --force: "
+        f"{post_cmds!r}"
+    )
+
+
+def test_init_hooks_force_preserves_user_time_hook_through_flag_cycle(tmp_path):
+    """Issue #26 — load-bearing principle: claude-recall NEVER touches a
+    hook command it didn't emit, no matter how similar it looks to ours.
+
+    Pre-state: user has manually composed their own time-injection hook
+    (no marker) alongside claude-recall's UserPromptSubmit hook. We flip
+    inject_time true → false → true with --force each time. The user's
+    time hook survives every cycle.
+    """
+    project_root = tmp_path / "proj"
+    (project_root / ".claude").mkdir(parents=True)
+
+    # User-managed time hook (top-level legacy form, no marker — this is
+    # what OC was manually pasting into projects before v0.6.8).
+    user_time_hook = (
+        "powershell -NoProfile -Command "
+        "@{additionalContext = 'Custom time: ' + (Get-Date)}"
+    )
+    pre = {
+        "hooks": {
+            "UserPromptSubmit": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": user_time_hook,
+                            "shell": "powershell",
+                        },
+                    ],
+                },
+            ],
+        }
+    }
+    settings_path = project_root / ".claude" / "settings.json"
+    settings_path.write_text(json.dumps(pre), encoding="utf-8")
+
+    cfg_on = tmp_path / "config_on.toml"
+    cfg_on.write_text("[hooks]\ninject_time = true\n", encoding="utf-8")
+    cfg_off = tmp_path / "config_off.toml"
+    cfg_off.write_text("[hooks]\ninject_time = false\n", encoding="utf-8")
+
+    # Cycle: inject_time on → off → on, --force each time.
+    for cfg_path in (cfg_on, cfg_off, cfg_on):
+        cli.main([
+            "--config", str(cfg_path),
+            "init-hooks", "--project-root", str(project_root), "--force",
+        ])
+        merged = json.loads(settings_path.read_text(encoding="utf-8"))
+        cmds = _hook_commands(merged["hooks"]["UserPromptSubmit"])
+        assert user_time_hook in cmds, (
+            f"user-managed time hook destroyed on cycle: {cmds!r}"
+        )
+
+
 def test_init_hooks_emits_schema_correct_nested_shape(tmp_path):
     """Issue #15 regression: settings.json must use the nested-array shape
     Claude Code's parser requires. Each matcher entry must be
