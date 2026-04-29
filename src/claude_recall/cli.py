@@ -52,6 +52,31 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command", required=True)
 
+    # topics (v0.7)
+    p_topics = sub.add_parser(
+        "topics",
+        help="Cluster the embedding space into recurring themes.",
+    )
+    p_topics.add_argument(
+        "--limit", type=int, default=20,
+        help="Maximum number of themes to return (default: 20).",
+    )
+    p_topics.add_argument(
+        "--min-cluster-size", type=int, default=4,
+        help="Drop clusters smaller than this (default: 4).",
+    )
+    p_topics.add_argument(
+        "--similarity-threshold", type=float, default=0.75,
+        help="Cosine similarity threshold for cluster merging (default: 0.75).",
+    )
+    p_topics.add_argument(
+        "--project",
+        help="Scope to one project slug, or 'auto' to use cwd's slug.",
+    )
+    p_topics.add_argument(
+        "--format", choices=["json", "text", "agent-context"], default="text",
+    )
+
     # index
     p_index = sub.add_parser("index", help="Walk the archive and update the index.")
     p_index.add_argument("--project", help="Scope to one project slug.")
@@ -203,6 +228,7 @@ def main(argv: list[str] | None = None) -> int:
         "status": _cmd_status,
         "init-hooks": _cmd_init_hooks,
         "embed": _cmd_embed,
+        "topics": _cmd_topics,
     }
     return handlers[args.command](args, cfg)
 
@@ -356,6 +382,55 @@ def _maybe_auto_embed(
         except Exception:  # noqa: BLE001
             pass
         conn.close()
+
+
+# --- topics (v0.7) ----------------------------------------------------------
+
+def _cmd_topics(args: argparse.Namespace, cfg: Config) -> int:
+    try:
+        from . import topics as _topics
+    except ImportError as exc:
+        print(
+            f"claude-recall topics requires the [embeddings] extra ({exc}). "
+            f"Install with: pip install 'claude-recall[embeddings]'",
+            file=sys.stderr,
+        )
+        return 1
+
+    if not cfg.embeddings.enabled:
+        print(
+            "topics requires embeddings. Set [embeddings].enabled = true in "
+            "config.toml.",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        conn = storage.open_db(cfg.db_path)
+    except storage.StorageError as exc:
+        print(f"database error: {exc}", file=sys.stderr)
+        return 2
+
+    project_slug = args.project
+    if project_slug == "auto":
+        project_slug = projects.resolve_project_slug(conn)
+
+    try:
+        response = _topics.run_topics(
+            conn,
+            project_slug=project_slug,
+            similarity_threshold=args.similarity_threshold,
+            min_cluster_size=args.min_cluster_size,
+            limit=args.limit,
+        )
+    except _topics.TopicsError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
+
+    print(_topics.format_topics(response, format=args.format), end="")
+    return 0
 
 
 # --- search -----------------------------------------------------------------

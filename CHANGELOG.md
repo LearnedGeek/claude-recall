@@ -2,6 +2,144 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.7.0 — 2026-04-29
+
+First-class thematic mining. Adds `claude-recall topics` — a new
+subcommand that clusters the embedding space into recurring themes,
+labels each cluster with TF-IDF distinctive terms, and ranks them so
+cross-project recurring themes float to the top. Designed primarily
+for OC's LearnedGeek instance, which uses claude-recall to surface
+unwritten blog topics across a 50,000+ message archive spanning 22
+projects.
+
+This release ships **feature 1** of the v0.7 plan
+(`~/.claude/plans/v0.7-thematic-mining.md`). Features 2 and 3
+(`--since` time-windowing and cross-project boost in semantic search)
+follow as v0.7.1 and v0.7.2 once the topics output is validated against
+real archives.
+
+### `claude-recall topics`
+
+```bash
+claude-recall topics --limit 30                       # broadest mining pass
+claude-recall topics --project <slug> --limit 15      # single-project drill-down
+claude-recall topics --format json                    # programmatic
+claude-recall topics --format agent-context           # pipe into a hook
+```
+
+For each cluster, the output includes:
+- A TF-IDF-derived label (e.g., "regex / patterns / extraction")
+- Cluster size and project count
+- Score = `cluster_size × project_count` (cross-project recurrence
+  ranks higher than same-project repetition)
+- Top-3 sample messages closest to the cluster centroid
+
+Flags:
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--limit` | 20 | Max themes to return (after scoring) |
+| `--min-cluster-size` | 4 | Drop below-threshold clusters as "noise" |
+| `--similarity-threshold` | 0.75 | Cosine similarity needed to merge into existing cluster |
+| `--project <slug>` | unset | Scope clustering to one project (or `auto` for cwd) |
+| `--format` | `text` | `text` / `json` / `agent-context` |
+
+### Lightweight clustering — no hdbscan dep
+
+The plan considered hdbscan (density-based, graceful noise handling)
+but rejected it: hdbscan ships a compiled C extension that historically
+breaks on Windows wheel installs, exactly the platform claude-recall's
+primary user runs on. Instead, v0.7.0 uses single-link agglomerative
+clustering on cosine similarity, implemented in pure numpy:
+
+- For each input vector, compute cosine similarity against every existing
+  cluster centroid via vectorized matmul.
+- Merge into the highest-similarity cluster if `cos ≥ threshold`, else
+  start a new cluster.
+- Re-compute the cluster's centroid as the L2-normalized mean of its
+  members on every merge.
+
+Cost: O(N × C) where C is the cluster count. For 50k vectors with ~hundreds
+of clusters, finishes in single-digit seconds on a desktop. Memory peak
+~80 MB (the (N × dim) vector matrix). Above ~100k vectors, an ANN-index
+backend (`faiss`/`annoy`) would help — file an issue if anyone's archive
+crosses that line.
+
+### TF-IDF cluster labels
+
+Filter against `keywords.STOPWORDS` so corpus-common words ("function",
+"code", "the") don't dominate. For each cluster, score each token by
+`tf × log(num_clusters / doc_freq)` — top-3 distinctive terms become the
+label. A word that appears in every cluster has IDF zero and gets dropped.
+A word concentrated in one cluster gets a high score there.
+
+### Output formats
+
+`text` — human-scannable list, ranked, with sample previews per theme.
+
+`json` — full `TopicsResponse` dataclass dump (themes + samples + project
+slugs + score). Programmatic consumers branch on this directly.
+
+`agent-context` — wrapped `hookSpecificOutput` envelope (issue #21) so
+the same machinery as search hooks can pipe topics into a manual
+planning hook for a "what have I been thinking about across projects?"
+context injection at session start.
+
+### Tests
+
+10 new tests in `tests/test_topics.py`:
+
+- `test_topics_groups_semantically_close_messages_into_one_cluster` —
+  three sets of basis-aligned vectors, assert exactly 3 clusters, no
+  cross-pollution.
+- `test_topics_label_extracts_distinctive_words` — distinctive terms
+  ("regex", "deployment") in labels; shared filler ("discussed", "team")
+  filtered out by IDF.
+- `test_topics_score_orders_cross_project_themes_above_single_project`
+  — equal-size clusters with different `project_count` rank by score.
+- `test_topics_returns_empty_when_no_vectors_indexed` — empty archive
+  returns clean empty response, no exception.
+- `test_topics_skips_dim_mismatch_vectors_silently` — mixed 8-dim + 4-dim
+  vectors: only the conformant subset clusters, others silently skipped
+  (mirrors `_semantic_rerank`'s defensive shape).
+- `test_topics_filters_below_min_cluster_size_to_noise` — singletons
+  excluded from themes, counted in `noise_count`.
+- `test_topics_format_json_matches_dataclass_shape` — full
+  `TopicsResponse` shape exposed.
+- `test_topics_format_agent_context_wrapped_envelope` — wrapped
+  `hookSpecificOutput` shape with `hookEventName: "UserPromptSubmit"`.
+- `test_topics_agent_context_empty_when_no_themes` — empty `{}` when
+  there are no themes (hook contract).
+- `test_topics_project_filter_scopes_clustering` — `--project` filter
+  scopes input messages before clustering.
+
+### Test-isolation infrastructure (subtle but worth noting)
+
+A new autouse fixture `_isolate_config_from_dev_machine` in `conftest.py`
+short-circuits `load_config(None)` to return dataclass defaults. Without
+it, tests that don't pass `--config` would read the developer's real
+config.toml on disk — surfaces as bizarre cross-test contamination if,
+say, the developer has `[hooks].inject_time = true` set globally and
+an init-hooks test asserts default-off behavior. This was discovered
+during v0.7.0's pytest sweep when several previously-passing init-hooks
+tests started failing.
+
+### Migration
+
+```
+pip install --upgrade claude-recall
+claude-recall topics --limit 30
+```
+
+No schema migration. Existing v0.6.x indexes work as-is. New subcommand
+is additive only.
+
+If `vectors_coverage` is below 95% (status would warn), run
+`claude-recall embed` first — topics requires embedded messages to
+cluster.
+
+197 Python tests pass; 62 C# tests pass; AOT binary builds clean.
+
 ## v0.6.8 — 2026-04-29
 
 Closes [#26](https://github.com/LearnedGeek/claude-recall/issues/26):

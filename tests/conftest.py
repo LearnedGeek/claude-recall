@@ -4,6 +4,9 @@ Covers:
 - Temporary archive dir with sample .jsonl fixtures
 - Temporary SQLite DB path
 - Opened DB connection with schema installed
+- Auto-isolated config so tests don't pick up the developer's real
+  ~/.config/claude-recall/config.toml (would surface as e.g. unexpected
+  `[hooks].inject_time = true` leaking into tests that don't pass --config)
 """
 
 from __future__ import annotations
@@ -17,6 +20,37 @@ import pytest
 from claude_recall import storage
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_config_from_dev_machine(monkeypatch):
+    """Force `load_config(None)` to return dataclass defaults during tests
+    that don't pass an explicit config path. Prevents the developer's real
+    config.toml (e.g., one with `[hooks].inject_time = true` set) from
+    leaking into test runs that assume default-off behavior.
+
+    Tests that DO pass `--config <path>` still go through the real loader
+    against that explicit path, so config-loading behavior itself remains
+    testable. Only the implicit-default path is short-circuited.
+
+    Tests that need to verify `default_config_path` itself (e.g.,
+    test_default_paths_platform_correct) call it directly and aren't
+    affected by this fixture.
+    """
+    from claude_recall import config as _config
+    original = _config.load_config
+
+    def isolated_load(path=None):
+        if path is None:
+            return _config.Config()
+        return original(path)
+
+    monkeypatch.setattr(_config, "load_config", isolated_load)
+    # Also patch the imported reference in cli.py since _cmd_* call it via
+    # the cli-module-level symbol, not via _config.load_config attribute.
+    from claude_recall import cli as _cli
+    monkeypatch.setattr(_cli, "load_config", isolated_load)
+    yield
 
 
 @pytest.fixture
