@@ -138,6 +138,16 @@ def build_parser() -> argparse.ArgumentParser:
             "are both true in config.toml. Shipped hook scripts pass this flag."
         ),
     )
+    p_search.add_argument(
+        "--cross-project-boost",
+        action="store_true",
+        help=(
+            "Multiplicatively boost semantic-rerank scores for projects that "
+            "contributed multiple hits (1.05x per extra hit, capped 1.5x). "
+            "Surfaces themes that recur across projects. Requires --semantic; "
+            "silently no-op when --project is set."
+        ),
+    )
 
     # show
     p_show = sub.add_parser("show", help="Fetch a session's full transcript.")
@@ -513,6 +523,7 @@ def _cmd_search(args: argparse.Namespace, cfg: Config) -> int:
                 semantic=semantic,
                 ollama_client=ollama_client,
                 rerank_pool_size=cfg.embeddings.rerank_pool_size,
+                cross_project_boost=args.cross_project_boost,
             )
         except search.SearchError as exc:
             print(f"invalid query: {exc}", file=sys.stderr)

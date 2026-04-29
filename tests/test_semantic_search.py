@@ -187,6 +187,186 @@ def test_semantic_partial_vector_coverage(tiny_indexed_db):
     assert "car problems" in resp.results[0].content_preview.lower()
 
 
+@pytest.fixture
+def multi_project_indexed_db(tmp_path):
+    """DB with 5 messages spread across 3 projects, all matching 'cascade'.
+
+    proj-A: 3 messages
+    proj-B: 1 message
+    proj-C: 1 message
+
+    Returns a (conn, msg_ids_by_project) tuple so tests can address each
+    message by project + index. msg_ids depend on the indexer's
+    file-walk order, so we look them up dynamically rather than hardcoding.
+    """
+    archive = tmp_path / "archive"
+    for proj, count in [("proj-A", 3), ("proj-B", 1), ("proj-C", 1)]:
+        proj_dir = archive / proj
+        proj_dir.mkdir(parents=True)
+        # File names must be unique because the indexer derives session_id
+        # from the file stem in the flat layout — same stem across projects
+        # would collide on the session_id PK.
+        jsonl = proj_dir / f"session-{proj}.jsonl"
+        lines = []
+        for i in range(count):
+            content = f"cascade variant {proj} {i}"
+            ts = f"2026-04-20T10:0{i}:00Z"
+            lines.append(
+                '{"type":"user","message":{"role":"user","content":"'
+                + content + '"},"timestamp":"' + ts + '"}'
+            )
+        jsonl.write_text("\n".join(lines), encoding="utf-8")
+    db_path = tmp_path / "index.db"
+    conn = storage.open_db(db_path)
+    indexer.run_index(conn, archive)
+
+    # Resolve msg_ids by project. Within a project, order by msg_id so the
+    # caller can address them as ids[proj][0], ids[proj][1], etc.
+    ids_by_project: dict[str, list[int]] = {}
+    rows = conn.execute(
+        "SELECT m.msg_id, s.project_slug FROM messages m "
+        "JOIN sessions s ON s.session_id = m.session_id "
+        "ORDER BY s.project_slug, m.msg_id"
+    ).fetchall()
+    for row in rows:
+        ids_by_project.setdefault(row["project_slug"], []).append(int(row["msg_id"]))
+
+    yield conn, ids_by_project
+    conn.close()
+
+
+def test_cross_project_boost_promotes_recurring_themes(multi_project_indexed_db):
+    """5 candidates with cosine in a tight band. proj-A contributes 3 hits,
+    proj-B and proj-C contribute 1 each. Without boost, the highest single
+    cosine wins. With boost, a proj-A hit should rank ahead of proj-B/C
+    once the 1.05× / 1.10× multiplier kicks in.
+
+    Cosine assignments are deliberately staggered so the no-boost order
+    has proj-B's hit at rank 1 (cosine 0.92), and proj-A's best hit at
+    rank 2 (cosine 0.90). With the 1.10× boost (3-hit project), proj-A's
+    score becomes 0.99 — clearly above proj-B's 0.92 — and it takes rank 1.
+    """
+    conn, ids = multi_project_indexed_db
+    query_vec = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    _seed_vectors(
+        conn,
+        {
+            ids["proj-A"][0]: np.array([0.90, 0.44, 0.0, 0.0], dtype=np.float32),
+            ids["proj-A"][1]: np.array([0.85, 0.53, 0.0, 0.0], dtype=np.float32),
+            ids["proj-A"][2]: np.array([0.80, 0.60, 0.0, 0.0], dtype=np.float32),
+            ids["proj-B"][0]: np.array([0.92, 0.39, 0.0, 0.0], dtype=np.float32),
+            ids["proj-C"][0]: np.array([0.83, 0.56, 0.0, 0.0], dtype=np.float32),
+        },
+    )
+    client = _ScriptedClient(query_vec)
+
+    # Without boost: proj-B's 0.92 wins.
+    no_boost = search.run_search(
+        conn,
+        "cascade",
+        semantic=True,
+        ollama_client=client,
+        limit=5,
+    )
+    assert no_boost.semantic_used is True
+    assert no_boost.results[0].project_slug == "proj-B"
+
+    # With boost: proj-A (3-hit project) gets 1.10× → 0.99 > 0.92 (proj-B).
+    boosted = search.run_search(
+        conn,
+        "cascade",
+        semantic=True,
+        ollama_client=client,
+        limit=5,
+        cross_project_boost=True,
+    )
+    assert boosted.semantic_used is True
+    assert boosted.results[0].project_slug == "proj-A", (
+        f"cross-project boost did not promote proj-A's recurring hits: "
+        f"top result was {boosted.results[0].project_slug!r}"
+    )
+
+
+def test_cross_project_boost_capped_does_not_overpower_clear_winner(
+    multi_project_indexed_db,
+):
+    """A clearly higher-cosine single-project hit must not be displaced by
+    the multiplicative boost. proj-A has 3 middling hits; proj-B has 1
+    obviously closer hit. Even at the boost cap (1.5×), proj-A's best
+    score (0.60 × 1.10 = 0.66) is well below proj-B's (0.99 raw).
+    """
+    conn, ids = multi_project_indexed_db
+    query_vec = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    _seed_vectors(
+        conn,
+        {
+            ids["proj-A"][0]: np.array([0.60, 0.80, 0.0, 0.0], dtype=np.float32),
+            ids["proj-A"][1]: np.array([0.55, 0.84, 0.0, 0.0], dtype=np.float32),
+            ids["proj-A"][2]: np.array([0.50, 0.87, 0.0, 0.0], dtype=np.float32),
+            ids["proj-B"][0]: np.array([0.99, 0.14, 0.0, 0.0], dtype=np.float32),
+            ids["proj-C"][0]: np.array([0.30, 0.95, 0.0, 0.0], dtype=np.float32),
+        },
+    )
+    client = _ScriptedClient(query_vec)
+
+    boosted = search.run_search(
+        conn,
+        "cascade",
+        semantic=True,
+        ollama_client=client,
+        limit=5,
+        cross_project_boost=True,
+    )
+    assert boosted.results[0].project_slug == "proj-B", (
+        f"boost overpowered a clear higher-cosine winner: top was "
+        f"{boosted.results[0].project_slug!r} at semantic_rank=0 "
+        f"(should be proj-B's 0.99 cosine)"
+    )
+
+
+def test_cross_project_boost_silently_noop_with_project_filter(
+    multi_project_indexed_db,
+):
+    """When --project scopes the pool to one project, boost has nothing
+    to promote and must produce identical output to the no-boost case.
+    No warning, no error — same shape as how --semantic silently degrades."""
+    conn, ids = multi_project_indexed_db
+    query_vec = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+    _seed_vectors(
+        conn,
+        {
+            ids["proj-A"][0]: np.array([0.90, 0.44, 0.0, 0.0], dtype=np.float32),
+            ids["proj-A"][1]: np.array([0.85, 0.53, 0.0, 0.0], dtype=np.float32),
+            ids["proj-A"][2]: np.array([0.80, 0.60, 0.0, 0.0], dtype=np.float32),
+        },
+    )
+    client = _ScriptedClient(query_vec)
+
+    no_boost = search.run_search(
+        conn,
+        "cascade",
+        semantic=True,
+        ollama_client=client,
+        limit=5,
+        project_slug="proj-A",
+    )
+    boosted = search.run_search(
+        conn,
+        "cascade",
+        semantic=True,
+        ollama_client=client,
+        limit=5,
+        project_slug="proj-A",
+        cross_project_boost=True,
+    )
+    no_boost_order = [r.turn_index for r in no_boost.results]
+    boosted_order = [r.turn_index for r in boosted.results]
+    assert no_boost_order == boosted_order, (
+        f"boost should silently no-op when scoped to one project, but "
+        f"order differs: no-boost={no_boost_order!r} vs boosted={boosted_order!r}"
+    )
+
+
 def test_rerank_pool_size_caps_candidates(tiny_indexed_db):
     """rerank_pool_size limits the FTS5 fetch to the pool; limit further caps output."""
     query_vec = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)

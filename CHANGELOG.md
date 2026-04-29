@@ -2,6 +2,62 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.7.2 — 2026-04-29
+
+Cross-project boost on `search --semantic`. Closes the v0.7 trilogy
+(topics → time-windowing → cross-project boost). Same intent as v0.7.0
+`topics` ranking — themes that recur across projects are more
+interesting than same-project repetition — but applied to per-prompt
+semantic search rather than archive-wide clustering.
+
+### `--cross-project-boost`
+
+```bash
+claude-recall search "feedback loop" --semantic --cross-project-boost
+claude-recall search "deployment retries" --semantic --cross-project-boost --limit 15
+```
+
+Multiplies cosine scores by `1 + 0.05 × (n_same_project_hits - 1)`,
+capped at `1.5×`:
+
+| Same-project hits in pool | Multiplier |
+|---|---|
+| 1 | 1.00× (no boost) |
+| 2 | 1.05× |
+| 5 | 1.20× |
+| 10+ | 1.50× (cap) |
+
+Multiplicative on cosine, applied **before** the final sort. The cap
+is deliberately soft: a clearly higher-cosine single-project hit
+still wins. The tests verify both behaviors:
+
+- `test_cross_project_boost_promotes_recurring_themes` — proj-A's 3
+  hits at cos≈0.80–0.90 boost to ≈0.99 and overtake proj-B's single
+  cos=0.92.
+- `test_cross_project_boost_capped_does_not_overpower_clear_winner` —
+  proj-B's cos=0.99 stays at rank 1 even when proj-A has 3 boosted
+  hits at cos≈0.50–0.60.
+- `test_cross_project_boost_silently_noop_with_project_filter` —
+  scoping to a single project produces identical output, no warning.
+
+### Interaction with `--project`
+
+Silently no-op. When the candidate pool is scoped to one project,
+every result has the same slug — there's nothing to promote. Mirrors
+how `--semantic` itself silently degrades when [embeddings] is off.
+
+### Default: opt-in
+
+`--cross-project-boost` is off by default in v0.7.2 — the same cadence
+as `[embeddings].use_in_hook` in v0.4. Validate against a real archive
+first; v0.7.x will flip the default once the boost demonstrably
+surfaces better results.
+
+### Migration
+
+Strictly additive. No schema change, no re-embed, no hook reinstall.
+Existing `search` invocations behave identically to v0.7.1.
+
 ## v0.7.1 — 2026-04-29
 
 Time-windowing for `claude-recall topics`. Adds `--since <date>` so the

@@ -71,6 +71,7 @@ def run_search(
     semantic: bool = False,
     ollama_client=None,
     rerank_pool_size: int = 50,
+    cross_project_boost: bool = False,
 ) -> SearchResponse:
     """Execute an FTS5 search (optionally semantic-reranked) and return results.
 
@@ -173,8 +174,14 @@ def run_search(
     semantic_used = False
     fallback_reason: str | None = None
     if semantic and ollama_client and results:
+        # When the caller scoped to a single project, the boost is
+        # meaningless (every result is from the same project) and would
+        # waste a Counter pass. Silently no-op rather than warn — mirrors
+        # how `--semantic` itself silently degrades.
+        boost = cross_project_boost and project_slug is None
         reranked, fallback_reason = _semantic_rerank(
-            conn, ollama_client, fts_input, msg_ids, results
+            conn, ollama_client, fts_input, msg_ids, results,
+            cross_project_boost=boost,
         )
         if reranked is not None:
             results = reranked
@@ -199,12 +206,22 @@ def _semantic_rerank(
     query_text: str,
     msg_ids: list[int],
     results: list[SearchResult],
+    *,
+    cross_project_boost: bool = False,
 ) -> tuple[list[SearchResult] | None, str | None]:
     """Rerank ``results`` by cosine vs. the query embedding.
 
     Returns (reranked_results, fallback_reason). If the semantic path fails
     (no vectors, Ollama down, shape mismatch), returns (None, reason) so the
     caller leaves the FTS5-only order in place and logs the reason.
+
+    When ``cross_project_boost`` is True (v0.7.2), results from projects
+    that contributed multiple hits get a multiplicative score nudge:
+    ``1.05× per additional same-project hit beyond the first, capped at
+    1.5×``. This surfaces themes that recur across projects above
+    same-project repetition without overpowering a clearly higher-scoring
+    single hit. No-op silently when the candidate pool spans only one
+    project.
     """
     try:
         from . import embeddings as _embeddings
@@ -256,6 +273,31 @@ def _semantic_rerank(
         scores = _embeddings.cosine_matrix(q, matrix)
         for k, orig_i in enumerate(kept_idx):
             indexed.append((orig_i, float(scores[k])))
+
+    # Cross-project boost (v0.7.2). Apply on cosine score before the final
+    # sort so the boost competes inside the same ranker the user would
+    # otherwise see. We only nudge when the candidate pool actually spans
+    # multiple projects — in a single-project pool there's nothing to
+    # promote, and the project-filter path passes through unchanged.
+    if cross_project_boost:
+        from collections import Counter
+        pool_projects = {results[i].project_slug for i, _ in indexed}
+        if len(pool_projects) >= 2:
+            proj_counts = Counter(results[i].project_slug for i, _ in indexed)
+            boosted: list[tuple[int, float]] = []
+            for orig_i, score in indexed:
+                if score == float("-inf"):
+                    # Vectorless rows stay at the bottom; no boost.
+                    boosted.append((orig_i, score))
+                    continue
+                slug = results[orig_i].project_slug
+                # 1.05× per additional same-project hit beyond the first,
+                # capped at 1.5× total. 1 hit → 1.0×, 2 → 1.05×, 5 → 1.20×,
+                # 10+ → 1.50×. Multiplicative on cosine — nudges adjacent
+                # ranks without flipping clear winners.
+                multiplier = min(1.0 + 0.05 * max(0, proj_counts[slug] - 1), 1.5)
+                boosted.append((orig_i, score * multiplier))
+            indexed = boosted
 
     # Sort indexed by semantic score desc, stable; record original bm25 rank.
     indexed.sort(key=lambda t: (-t[1], t[0]))
