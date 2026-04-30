@@ -2,6 +2,82 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.8.2 — 2026-04-30
+
+`claude-recall migrate` — relocate a project archive when the project
+moves on disk. Closes [issue #25].
+
+### When to use
+
+Same-machine relocation: a code project moves from
+`E:\Documents\Work\dev\repos\foo` to `E:\dev\repos\foo`. Claude Code
+starts writing future sessions under a slug derived from the new path,
+the old archive directory stays where it was, and claude-recall's
+SessionStart hook auto-scopes to the new slug — silently severing the
+link to prior recall history. The old archive becomes invisible to
+the active project unless you explicitly search `--project <old-slug>`.
+
+```bash
+claude-recall migrate \
+  --from e--Documents-Work-dev-repos-foo \
+  --to e--dev-repos-foo
+# Migrated 47 sessions, 8,213 messages, 8,089 vectors preserved.
+# Archive directory: 'e--Documents-Work-dev-repos-foo' → 'e--dev-repos-foo'
+# Run `claude-recall status` to verify.
+```
+
+### What it does
+
+1. Moves `~/.claude/projects/<from-slug>/` → `~/.claude/projects/<to-slug>/`
+2. Updates every `sessions` row in a single transaction:
+   - `project_slug`: from-slug → to-slug
+   - `file_path`: replace the old archive path component with the new
+3. Vectors are preserved untouched. msg_id PKs don't change, so the
+   FK chain to `message_vectors` holds — no re-embed required.
+
+On any failure during the DB update, the disk move is rolled back
+so the user is not left in a half-state.
+
+### Flags
+
+| Flag | Purpose |
+|---|---|
+| `--from <slug>` | Required. Existing project slug. Validated against archive root. |
+| `--to <slug>` | Required. Target project slug. Validated as not-already-existing (unless `--force`). |
+| `--force` | Overwrite an existing target archive directory. Rare; prefer to investigate the conflict before reaching for this. |
+| `--dry-run` | Preview the migration: report counts and intended renames, change nothing. |
+
+### Cross-machine relocation: not what this is for
+
+Moving an archive to a different host is a different operation:
+there's no existing DB on the destination to update. The right path
+there is to `tar` the archive, scp/copy to the destination, extract
+into the appropriate slug directory, then `pip install
+'claude-recall[embeddings]'` and `claude-recall index` to build a
+fresh DB. See the migration walkthrough in this thread for the full
+sequence.
+
+### Tests (237 → 246, +9)
+
+- `test_migrate_moves_archive_dir_and_updates_db_rows` — happy path
+- `test_migrate_preserves_message_vectors` — the load-bearing claim:
+  vectors survive the migrate without re-embedding
+- `test_migrate_refuses_when_target_exists_without_force`
+- `test_migrate_force_overwrites_existing_target`
+- `test_migrate_refuses_when_source_missing`
+- `test_migrate_refuses_same_slug` — from == to is a no-op error
+- `test_migrate_dry_run_makes_no_changes` — preview-only doesn't touch
+  disk or DB
+- `test_migrate_format_report_includes_counts` — CLI output shape
+- `test_migrate_dry_run_format_report_says_no_changes`
+
+### Migration
+
+Strictly additive. New subcommand. No schema change, no re-embed,
+no hook reinstall.
+
+[issue #25]: https://github.com/LearnedGeek/claude-recall/issues/25
+
 ## v0.8.1 — 2026-04-29
 
 PROCEDURAL classifier extensions for residual agent-action narrators

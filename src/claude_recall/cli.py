@@ -219,6 +219,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_embed.add_argument("--verbose", action="store_true")
 
+    # migrate (v0.8.2, issue #25)
+    p_migrate = sub.add_parser(
+        "migrate",
+        help=(
+            "Relocate a project archive when the project moves on disk. "
+            "Same machine only — for cross-machine moves, use index on the "
+            "destination."
+        ),
+    )
+    p_migrate.add_argument(
+        "--from", dest="from_slug", required=True,
+        help="Existing project slug (must match an archive directory).",
+    )
+    p_migrate.add_argument(
+        "--to", dest="to_slug", required=True,
+        help="Target project slug (must NOT already exist, unless --force).",
+    )
+    p_migrate.add_argument(
+        "--force", action="store_true",
+        help="Overwrite an existing target archive directory (rare).",
+    )
+    p_migrate.add_argument(
+        "--dry-run", action="store_true",
+        help="Preview the migration without making changes.",
+    )
+
     return parser
 
 
@@ -257,6 +283,7 @@ def main(argv: list[str] | None = None) -> int:
         "init-hooks": _cmd_init_hooks,
         "embed": _cmd_embed,
         "topics": _cmd_topics,
+        "migrate": _cmd_migrate,
     }
     return handlers[args.command](args, cfg)
 
@@ -468,6 +495,37 @@ def _cmd_topics(args: argparse.Namespace, cfg: Config) -> int:
         conn.close()
 
     print(_topics.format_topics(response, format=args.format), end="")
+    return 0
+
+
+# --- migrate ----------------------------------------------------------------
+
+def _cmd_migrate(args: argparse.Namespace, cfg: Config) -> int:
+    from . import migrate as _migrate
+
+    archive_root = Path(cfg.archive_root).expanduser()
+    try:
+        conn = storage.open_db(cfg.db_path)
+    except storage.StorageError as exc:
+        print(f"database error: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        report = _migrate.run_migrate(
+            conn,
+            archive_root,
+            from_slug=args.from_slug,
+            to_slug=args.to_slug,
+            force=args.force,
+            dry_run=args.dry_run,
+        )
+    except _migrate.MigrateError as exc:
+        print(f"migrate: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        conn.close()
+
+    print(_migrate.format_report(report))
     return 0
 
 
