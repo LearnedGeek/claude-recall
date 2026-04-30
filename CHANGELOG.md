@@ -2,6 +2,34 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.8.3 — 2026-04-30
+
+Documentation fix to `CONFIG_TEMPLATE` — the commented config.toml
+emitted on fresh installs (when no config exists yet) was missing the
+`[hooks]` section that v0.6.8 added. The runtime knob (`inject_time`)
+worked, but a user landing on a fresh install had no in-template
+indication that the option existed.
+
+Caught by OC during a clean server install where the gap was
+immediately visible.
+
+The template now includes:
+
+```toml
+# [hooks]
+# inject_time = false
+```
+
+with a one-line description of the knob.
+
+### Migration
+
+No-op for existing installs (the template is only written when the
+file doesn't already exist; existing configs are never rewritten).
+For users who want the section in an already-present config, add
+the snippet manually and re-run `init-hooks --force` to pick up the
+setting. Strictly additive otherwise.
+
 ## v0.8.2 — 2026-04-30
 
 `claude-recall migrate` — relocate a project archive when the project

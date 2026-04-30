@@ -1720,6 +1720,15 @@ CONFIG_TEMPLATE = '''# claude-recall configuration
 # [indexing]
 # index_tool_blocks = false
 
+# [hooks]
+# inject_time = false                     # When true, init-hooks installs an
+#                                         # additional UserPromptSubmit hook that
+#                                         # injects current local time into every
+#                                         # prompt. Useful when "tonight",
+#                                         # "yesterday", "next week" need to
+#                                         # resolve to a real wall-clock value.
+#                                         # Off by default; opt in per project.
+
 # Semantic rerank via Ollama embeddings. Off by default so the tool works
 # zero-dep. To turn on:
 #   1. pip install "claude-recall[embeddings] @ <wheel url>"
