@@ -688,6 +688,154 @@ def test_v1_to_v2_migration_preserves_vectors(tmp_path):
         conn.close()
 
 
+def test_v2_to_v3_migration_classifies_existing_messages(tmp_path):
+    """Open a manually-constructed v2-schema DB with mixed message kinds,
+    let storage.open_db() auto-migrate to v3, assert content_kind is
+    populated for every row and the classifier verdict is correct.
+
+    Issue #27 (v0.8): the migration's role is to retro-classify the
+    entire corpus on first open after upgrade so existing archives
+    immediately benefit from the THOUGHT-only filter without requiring
+    a re-index.
+    """
+    import sqlite3 as _sqlite
+    from claude_recall import content_kinds, storage
+
+    db_path = tmp_path / "v2.db"
+
+    # Build a v2-schema DB by hand (has content_hash, no content_kind).
+    conn = _sqlite.connect(str(db_path))
+    conn.executescript("""
+        CREATE TABLE sessions (
+            session_id TEXT PRIMARY KEY,
+            project_slug TEXT NOT NULL,
+            file_path TEXT NOT NULL UNIQUE,
+            file_mtime REAL NOT NULL,
+            started_at TEXT,
+            ended_at TEXT,
+            turn_count INTEGER NOT NULL DEFAULT 0,
+            indexed_at TEXT NOT NULL
+        );
+        CREATE TABLE messages (
+            msg_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            turn_index INTEGER NOT NULL,
+            timestamp TEXT,
+            content_hash TEXT,
+            FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+                ON DELETE CASCADE
+        );
+        CREATE VIRTUAL TABLE messages_fts USING fts5(
+            content,
+            content='messages',
+            content_rowid='msg_id',
+            tokenize='porter unicode61'
+        );
+        CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
+            INSERT INTO messages_fts(rowid, content)
+                VALUES (new.msg_id, new.content);
+        END;
+        CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
+            INSERT INTO messages_fts(messages_fts, rowid, content)
+                VALUES ('delete', old.msg_id, old.content);
+        END;
+        CREATE TRIGGER messages_au AFTER UPDATE ON messages BEGIN
+            INSERT INTO messages_fts(messages_fts, rowid, content)
+                VALUES ('delete', old.msg_id, old.content);
+            INSERT INTO messages_fts(rowid, content)
+                VALUES (new.msg_id, new.content);
+        END;
+        CREATE TABLE message_vectors (
+            msg_id INTEGER PRIMARY KEY,
+            vector BLOB NOT NULL,
+            model TEXT NOT NULL,
+            dim INTEGER NOT NULL,
+            embedded_at TEXT NOT NULL,
+            FOREIGN KEY (msg_id) REFERENCES messages(msg_id) ON DELETE CASCADE
+        );
+        CREATE TABLE schema_version (version INTEGER PRIMARY KEY);
+        INSERT INTO schema_version VALUES (1);
+        INSERT INTO schema_version VALUES (2);
+    """)
+    conn.execute(
+        "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?)",
+        ("s1", "p1", "/tmp/s1.jsonl", 1.0, "ts0", "ts1", 4,
+         "2026-04-25T00:00:00Z"),
+    )
+    # Seed one of each kind so the classifier verdict is observable.
+    rows_to_seed = [
+        # Wrapper-tag harness
+        ("s1", "user", "<ide_opened_file>foo.md</ide_opened_file>",
+         0, "ts0", "h0"),
+        # Procedural
+        ("s1", "assistant", "Let me check the existing patterns.",
+         1, "ts1", "h1"),
+        # Thought
+        ("s1", "user", "Should we keep the v1 cache layer or rebuild?",
+         2, "ts2", "h2"),
+        # Tool-result embedded
+        ("s1", "assistant",
+         "public class Foo { private readonly string _name; "
+         "public string Name => _name; public Foo(string name) { _name = name; } "
+         "public void Bar() { Console.WriteLine($\"Hello {_name}\"); } }",
+         3, "ts3", "h3"),
+    ]
+    conn.executemany(
+        "INSERT INTO messages(session_id, role, content, turn_index, timestamp, content_hash) "
+        "VALUES (?,?,?,?,?,?)",
+        rows_to_seed,
+    )
+    conn.commit()
+    conn.close()
+
+    # Open via the v0.8 path — v2→v3 migration should run.
+    conn = storage.open_db(db_path)
+    try:
+        # schema_version 3 stamped (and 1, 2 retained for audit trail).
+        rows = conn.execute(
+            "SELECT version FROM schema_version ORDER BY version"
+        ).fetchall()
+        versions = [r["version"] for r in rows]
+        assert 3 in versions
+
+        # content_kind column exists and is populated for every row.
+        cols = [
+            r["name"] for r in conn.execute(
+                "PRAGMA table_info(messages)"
+            ).fetchall()
+        ]
+        assert "content_kind" in cols
+
+        rows = conn.execute(
+            "SELECT msg_id, role, content, content_kind FROM messages "
+            "WHERE session_id=? ORDER BY turn_index",
+            ("s1",),
+        ).fetchall()
+        assert len(rows) == 4
+        for r in rows:
+            assert r["content_kind"] is not None, (
+                f"row {r['msg_id']} missing content_kind after migration"
+            )
+
+        # Classifier verdict matches expectation per row.
+        kinds_by_turn = {r["msg_id"]: r["content_kind"] for r in rows}
+        assert kinds_by_turn[1] == content_kinds.HARNESS
+        assert kinds_by_turn[2] == content_kinds.PROCEDURAL
+        assert kinds_by_turn[3] == content_kinds.THOUGHT
+        assert kinds_by_turn[4] == content_kinds.TOOL_RESULT_EMBEDDED
+
+        # idx_messages_content_kind exists and is queryable.
+        index_rows = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='index' AND name='idx_messages_content_kind'"
+        ).fetchall()
+        assert len(index_rows) == 1, "content_kind index not created by migration"
+    finally:
+        conn.close()
+
+
 def test_concurrent_index_runs_do_not_double_insert(archive_dir, tmp_path):
     """Two threads call run_index against the same archive simultaneously.
     Property under test: no duplicate messages produced, regardless of

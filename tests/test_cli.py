@@ -176,7 +176,7 @@ def test_status_json(cli_env):
     assert code == 0
     payload = json.loads(out)
     assert payload["total_sessions"] == 3
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert payload["checks"]["archive_accessible"] is True
     assert payload["checks"]["db_accessible"] is True
     assert payload["checks"]["fts_available"] is True

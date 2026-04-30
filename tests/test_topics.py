@@ -18,9 +18,12 @@ from claude_recall import embeddings, storage, topics
 
 def _seed_message(conn, *, msg_id, session_id, project_slug, content,
                   vector, dim=8, role="user", started_at="2026-04-25",
-                  turn_index=0):
+                  turn_index=0, content_kind="THOUGHT"):
     """Insert a session row (if needed), a messages row, and a message_vectors
     row with the given vector. Self-contained — no fixture archive required.
+
+    ``content_kind`` defaults to THOUGHT so existing tests (pre-v0.8) that
+    don't know about kinds get the kind that ``topics`` actually queries.
     """
     conn.execute(
         "INSERT OR IGNORE INTO sessions(session_id, project_slug, file_path, "
@@ -32,9 +35,10 @@ def _seed_message(conn, *, msg_id, session_id, project_slug, content,
     # Override autoincrement so our msg_id matches the seed.
     conn.execute(
         "INSERT INTO messages(msg_id, session_id, role, content, turn_index, "
-        "timestamp, content_hash) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (msg_id, session_id, role, content, turn_index, started_at, ""),
+        "timestamp, content_hash, content_kind) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (msg_id, session_id, role, content, turn_index, started_at, "",
+         content_kind),
     )
     conn.execute(
         "INSERT INTO message_vectors(msg_id, vector, model, dim, embedded_at) "
@@ -520,3 +524,108 @@ def test_topics_project_filter_scopes_clustering(db_conn):
     assert response.total_clusters == 1
     assert response.themes[0].project_slugs == ["proj-target"]
     assert response.project_slug == "proj-target"
+
+
+# ---------------------------------------------------------------------------
+# v0.8 (issue #27): THOUGHT-only filter
+# ---------------------------------------------------------------------------
+
+def test_topics_excludes_harness_procedural_tool_result(db_conn):
+    """The THOUGHT filter is the load-bearing fix for issue #27. Seed a
+    mix of all four kinds and assert ``topics`` returns only the THOUGHT
+    cluster — HARNESS, PROCEDURAL, and TOOL_RESULT_EMBEDDED messages
+    are pre-classified at index time and skipped by the SQL filter."""
+    next_id = 1
+    # 5 THOUGHT messages clustering on direction 0.
+    for variant in range(5):
+        v = _cluster_at(0, dim=8, seed=variant)
+        _seed_message(
+            db_conn,
+            msg_id=next_id,
+            session_id=f"thought-{variant}",
+            project_slug="proj-A",
+            content=f"substantive design discussion {variant}",
+            vector=v,
+            content_kind="THOUGHT",
+        )
+        next_id += 1
+    # 5 HARNESS messages — should be EXCLUDED.
+    for variant in range(5):
+        v = _cluster_at(1, dim=8, seed=100 + variant)
+        _seed_message(
+            db_conn,
+            msg_id=next_id,
+            session_id=f"harness-{variant}",
+            project_slug="proj-A",
+            content=f"<ide_opened_file>file{variant}.md</ide_opened_file>",
+            vector=v,
+            content_kind="HARNESS",
+        )
+        next_id += 1
+    # 5 PROCEDURAL messages — should be EXCLUDED.
+    for variant in range(5):
+        v = _cluster_at(2, dim=8, seed=200 + variant)
+        _seed_message(
+            db_conn,
+            msg_id=next_id,
+            session_id=f"proc-{variant}",
+            project_slug="proj-A",
+            content=f"Let me check the patterns {variant}",
+            vector=v,
+            role="assistant",
+            content_kind="PROCEDURAL",
+        )
+        next_id += 1
+    # 5 TOOL_RESULT_EMBEDDED messages — should be EXCLUDED.
+    for variant in range(5):
+        v = _cluster_at(3, dim=8, seed=300 + variant)
+        _seed_message(
+            db_conn,
+            msg_id=next_id,
+            session_id=f"tool-{variant}",
+            project_slug="proj-A",
+            content=f"public class Foo{variant} {{ }}",
+            vector=v,
+            role="assistant",
+            content_kind="TOOL_RESULT_EMBEDDED",
+        )
+        next_id += 1
+
+    response = topics.run_topics(
+        db_conn, similarity_threshold=0.5, min_cluster_size=3,
+    )
+
+    # Only the 5 THOUGHT-kind messages clustered; the other 15 are
+    # filtered out before clustering even runs.
+    assert response.total_messages_clustered == 5
+    assert response.total_clusters == 1
+    assert response.themes[0].cluster_size == 5
+
+
+def test_topics_includes_null_content_kind_rows(db_conn):
+    """Rows with NULL content_kind (interrupted or skipped migration)
+    are included alongside THOUGHT — same NULL-tolerance discipline as
+    the timestamp filter. Avoids silently dropping otherwise-valid data."""
+    next_id = 1
+    for variant in range(5):
+        v = _cluster_at(0, dim=8, seed=variant)
+        _seed_message(
+            db_conn,
+            msg_id=next_id,
+            session_id=f"null-{variant}",
+            project_slug="proj-A",
+            content=f"unclassified message {variant}",
+            vector=v,
+            content_kind="THOUGHT",
+        )
+        next_id += 1
+    # Patch one row to NULL content_kind to simulate a partially-migrated DB.
+    db_conn.execute("UPDATE messages SET content_kind = NULL WHERE msg_id = 1")
+    db_conn.commit()
+
+    response = topics.run_topics(
+        db_conn, similarity_threshold=0.5, min_cluster_size=3,
+    )
+
+    # All 5 still clustered — NULL kind treated as eligible.
+    assert response.total_messages_clustered == 5

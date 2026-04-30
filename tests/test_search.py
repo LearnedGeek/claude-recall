@@ -312,3 +312,89 @@ def test_recent_session_within_days_window(archive_dir, db_conn):
     indexer.run_index(db_conn, archive_dir)
     resp = search.run_search(db_conn, "xyzzy", days=1)
     assert resp.total_matches >= 1
+
+
+# ---------------------------------------------------------------------------
+# v0.8 (issue #27): --kind flag scoping
+# ---------------------------------------------------------------------------
+
+def test_kind_filter_scopes_to_requested_kinds(db_conn):
+    """`kinds=['THOUGHT']` restricts results to THOUGHT messages.
+    A search across a mix of kinds with a shared FTS term should
+    return only the kind(s) requested."""
+    # Seed a session and four messages with the same matchable token but
+    # different content_kind values.
+    db_conn.execute(
+        "INSERT INTO sessions(session_id, project_slug, file_path, "
+        "file_mtime, started_at, ended_at, turn_count, indexed_at) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        ("s-kind", "p-kind", "/test/s-kind.jsonl", 1.0,
+         "2026-04-25", "2026-04-25", 4, "2026-04-25"),
+    )
+    seeds = [
+        ("user", "alpha-token substantive thought content", 0, "THOUGHT"),
+        ("assistant", "alpha-token Let me check the patterns", 1, "PROCEDURAL"),
+        ("user", "alpha-token <ide_opened_file>foo</ide_opened_file>", 2, "HARNESS"),
+        ("assistant", "alpha-token public class { } private string", 3,
+         "TOOL_RESULT_EMBEDDED"),
+    ]
+    for role, content, turn, kind in seeds:
+        db_conn.execute(
+            "INSERT INTO messages(session_id, role, content, turn_index, "
+            "timestamp, content_hash, content_kind) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("s-kind", role, content, turn, "2026-04-25", "h", kind),
+        )
+    db_conn.commit()
+
+    # Default: no --kind, all four hits returned.
+    all_kinds = search.run_search(db_conn, "alpha-token", days=365, limit=10)
+    assert all_kinds.total_matches == 4
+
+    # --kind THOUGHT: only the THOUGHT message.
+    thought_only = search.run_search(
+        db_conn, "alpha-token", days=365, limit=10, kinds=["THOUGHT"],
+    )
+    assert thought_only.total_matches == 1
+    assert "substantive" in thought_only.results[0].content_preview
+
+    # --kind THOUGHT --kind PROCEDURAL: both, but not HARNESS or TOOL.
+    two_kinds = search.run_search(
+        db_conn, "alpha-token", days=365, limit=10,
+        kinds=["THOUGHT", "PROCEDURAL"],
+    )
+    assert two_kinds.total_matches == 2
+
+
+def test_kind_filter_includes_null_kind_rows(db_conn):
+    """NULL content_kind is included alongside any requested kinds —
+    same NULL-tolerance discipline `topics` uses, so partially-migrated
+    DBs don't silently lose hits."""
+    db_conn.execute(
+        "INSERT INTO sessions(session_id, project_slug, file_path, "
+        "file_mtime, started_at, ended_at, turn_count, indexed_at) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        ("s-null", "p-null", "/test/s-null.jsonl", 1.0,
+         "2026-04-25", "2026-04-25", 2, "2026-04-25"),
+    )
+    db_conn.execute(
+        "INSERT INTO messages(session_id, role, content, turn_index, "
+        "timestamp, content_hash, content_kind) "
+        "VALUES (?,?,?,?,?,?,?)",
+        ("s-null", "user", "betatok thought content", 0, "2026-04-25", "h",
+         "THOUGHT"),
+    )
+    db_conn.execute(
+        "INSERT INTO messages(session_id, role, content, turn_index, "
+        "timestamp, content_hash, content_kind) "
+        "VALUES (?,?,?,?,?,?,?)",
+        ("s-null", "user", "betatok unclassified content", 1, "2026-04-25", "h",
+         None),
+    )
+    db_conn.commit()
+
+    # --kind THOUGHT: returns BOTH (THOUGHT row + NULL-kind row).
+    resp = search.run_search(
+        db_conn, "betatok", days=365, limit=10, kinds=["THOUGHT"],
+    )
+    assert resp.total_matches == 2

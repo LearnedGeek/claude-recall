@@ -20,7 +20,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def content_hash(content: str) -> str:
@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS messages (
     turn_index      INTEGER NOT NULL,
     timestamp       TEXT,
     content_hash    TEXT,
+    content_kind    TEXT,
     FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
 );
 
@@ -66,6 +67,11 @@ CREATE INDEX IF NOT EXISTS idx_messages_session_turn
 
 CREATE INDEX IF NOT EXISTS idx_messages_timestamp
     ON messages(timestamp DESC);
+
+-- v0.8 idx_messages_content_kind is created in _migrate_v2_to_v3 because
+-- the column it indexes is itself added by that migration. Putting it
+-- here would fail on existing v1/v2 DBs (CREATE INDEX before column
+-- exists). Fresh-install path covers it via the same migration call.
 
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     content,
@@ -201,6 +207,9 @@ def _install_schema(conn: sqlite3.Connection) -> None:
     if current < 2:
         _migrate_v1_to_v2(conn)
 
+    if current < 3:
+        _migrate_v2_to_v3(conn)
+
     conn.execute(
         "INSERT OR IGNORE INTO schema_version(version) VALUES (?)",
         (SCHEMA_VERSION,),
@@ -233,4 +242,53 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
         conn.executemany(
             "UPDATE messages SET content_hash = ? WHERE msg_id = ?",
             [(content_hash(r["content"]), r["msg_id"]) for r in rows],
+        )
+
+    # Stamp v2 explicitly so a chained v1→v3 upgrade leaves a complete
+    # audit trail (1, 2, 3) rather than just (1, 3). INSERT OR IGNORE
+    # absorbs the duplicate when the same migration retries.
+    conn.execute("INSERT OR IGNORE INTO schema_version(version) VALUES (2)")
+
+
+def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
+    """Add `messages.content_kind` and backfill via the classifier.
+
+    Issue #27 (v0.8): downstream queries (``topics``, ``search --kind``)
+    need to scope by content kind. The migration classifies every
+    existing message in the corpus on first open after upgrade. On a
+    50k-message archive this is a one-time ~few-second cost; subsequent
+    runs query the indexed column.
+
+    Like the v2 migration, we introspect via ``PRAGMA table_info`` and
+    skip the ALTER if the column already exists, so a partial migration
+    can be re-run safely. The backfill itself only touches rows whose
+    ``content_kind`` is NULL — the column starts at NULL on a fresh
+    column add but at "previously classified" on a re-run, and we
+    leave classified rows alone.
+    """
+    from . import content_kinds
+
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(messages)").fetchall()]
+    if "content_kind" not in cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN content_kind TEXT")
+
+    # Create the index AFTER the column is guaranteed to exist. Both
+    # fresh installs (column added by this migration on first open) and
+    # upgrades (column added by ALTER above) reach this line with the
+    # column in place.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_content_kind "
+        "ON messages(content_kind)"
+    )
+
+    rows = conn.execute(
+        "SELECT msg_id, content, role FROM messages WHERE content_kind IS NULL"
+    ).fetchall()
+    if rows:
+        conn.executemany(
+            "UPDATE messages SET content_kind = ? WHERE msg_id = ?",
+            [
+                (content_kinds.classify(r["content"], r["role"]), r["msg_id"])
+                for r in rows
+            ],
         )

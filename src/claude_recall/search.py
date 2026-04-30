@@ -72,6 +72,7 @@ def run_search(
     ollama_client=None,
     rerank_pool_size: int = 50,
     cross_project_boost: bool = False,
+    kinds: list[str] | None = None,
 ) -> SearchResponse:
     """Execute an FTS5 search (optionally semantic-reranked) and return results.
 
@@ -144,6 +145,15 @@ def run_search(
         # "list shows it but search returns nothing" symptom.
         sql += " AND LOWER(s.project_slug) = LOWER(?)"
         tail_params.append(project_slug)
+    if kinds:
+        # v0.8 (issue #27): scope to caller-specified content kinds.
+        # NULL content_kind values are included alongside the requested
+        # kinds so partially-classified DBs (interrupted v3 migration,
+        # legacy archives) don't silently lose hits — same NULL-tolerance
+        # discipline `topics` uses.
+        placeholders = ",".join("?" * len(kinds))
+        sql += f" AND (m.content_kind IS NULL OR m.content_kind IN ({placeholders}))"
+        tail_params.extend(kinds)
     sql += " ORDER BY bm25(messages_fts) ASC"
     if pool is not None:
         sql += f" LIMIT {int(pool)}"

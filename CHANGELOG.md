@@ -2,6 +2,127 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.8.0 — 2026-04-29
+
+**Content-kind tier separation.** Closes [issue #27]. The architectural
+move that makes `topics` work on real archives: messages are no longer
+treated as undifferentiated text. Every message is classified at index
+time into one of four kinds, and downstream queries scope to the kind
+that carries signal for them.
+
+This release was diagnosed and specified by the dual-Claude collaboration
+documented in [issue #27 comments](https://github.com/LearnedGeek/claude-recall/issues/27).
+The deeper architectural pattern — *walls between content kinds enable
+better retrieval, not worse* — is borrowed from ANI Runtime's Apr 10 2026
+epistemic-grounding reform. Same pattern, second deployment.
+
+### The four content kinds
+
+| Kind | What it is | `topics`? | `search` default? |
+|---|---|---|---|
+| **THOUGHT** | User prompts, agent substantive reasoning, design discussions | ✓ default | ✓ |
+| **PROCEDURAL** | Agent narration ("Let me check…", "Now I'll…"), build-cycle status, "Now Foo:" file announcements, post-compact "Perfect! Now…" templates | ✗ excluded | ✓ |
+| **HARNESS** | System wrappers (`<ide_opened_file>`, `<task-notification>`, `<system-reminder>`, `<user-summary>`, `<analysis>`, …), canonical auto-summarization openers, system-role single-line markers | ✗ excluded | ✓ |
+| **TOOL_RESULT_EMBEDDED** | Assistant messages dominated by quoted code/data tokens (high keyword density or punct density) | ✗ excluded | ✓ |
+
+### What this fixes (issue #27 ranking)
+
+The ranking failure mode was: top-30 clusters in `topics` were almost
+entirely conversational mechanics and system-injected scaffolding,
+not topical content. ~6/50 useful clusters in real-world output;
+genuine topics (`paper / ani / research`, `memories / memory /
+retrieval`, `migration / schema / migrations`) only appeared past
+rank 25.
+
+After v0.8.0 on the same 50,140-message archive:
+
+- HARNESS messages (2,371 ≈ 4.7% of corpus) excluded before clustering
+- PROCEDURAL messages (19,855 ≈ 39%) excluded before clustering
+- TOOL_RESULT_EMBEDDED (609 ≈ 1.2%) excluded before clustering
+- THOUGHT slice (26,724 ≈ 53%) clustered
+
+Clusters that previously dominated rank 1–10 are gone; real topical
+clusters that were rank 27+ now appear in the top 15. The ranking
+shape went from "mostly noise to manually skip past" to "broadly
+scannable for blog-topic candidates."
+
+### Schema v3 migration
+
+`messages` gains a `content_kind TEXT` column (indexed). On first
+open after upgrade, every existing row is classified by the canonical
+classifier and the column is backfilled in a single migration pass.
+Vectors are preserved untouched — same non-destructive shape as the
+v0.6 v2 migration.
+
+```bash
+# Migration is automatic. No flags. No data loss. Just open the DB:
+claude-recall status   # triggers v2 → v3 migration; reports schema_version: 3
+```
+
+The audit trail in `schema_version` retains all prior versions
+(`1, 2, 3` after a v1 → v3 upgrade) so downgrades and forensic
+work can see the full migration history.
+
+### `--kind` flag on `search`
+
+```bash
+claude-recall search "regex" --kind THOUGHT                       # only substantive content
+claude-recall search "build" --kind PROCEDURAL                    # status messages
+claude-recall search "<ide_opened_file>" --kind HARNESS           # wrapper-tag debugging
+claude-recall search "ApiCombatGame" --kind TOOL_RESULT_EMBEDDED  # code archaeology
+claude-recall search "deploy" --kind THOUGHT --kind PROCEDURAL    # mix and match
+```
+
+Default behavior unchanged: without `--kind`, `search` returns
+results from all kinds (backward-compatible with v0.7).
+
+### Stricter IDF threshold for cluster labels
+
+The previous label heuristic suppressed only words appearing in
+**every** cluster — too lax once the harness/procedural noise
+was filtered. v0.8 tightens to suppress words appearing in more
+than 50% of clusters (`LABEL_CLUSTER_UNIQUENESS_THRESHOLD = 0.5`).
+With the much-cleaner THOUGHT-only pool the IDF math finally has
+distinctive signal to work with.
+
+### Architectural reframe (cross-project transfer)
+
+The mistake that drove issue #27 wasn't a missing stoplist — it was
+treating messages as one substance when they're at least four. The
+right design is *classify content kind at index time, build
+view-appropriate query surfaces*. ANI Runtime made this exact move
+for memory architecture (Facts / Episodic / Interior tiers); DrOk's
+medical-triage architecture is a third deployment in design.
+
+The implication for future failure modes: when a register shift
+exposes a new noise pattern (cooking-archive content, customer-support
+content, ML-research content), the answer is not "extend the
+stopword list." It's "is this a fifth content kind, and does it
+need its own query surface?" That's a navigation question, not a
+maintenance question. Stoplists never converge; substrate types do.
+
+### Migration
+
+Auto-triggers on first open. Re-classifies the entire corpus once;
+subsequent runs query the indexed column. Existing vectors and
+sessions untouched. No re-embed required. No hook reinstall required.
+
+### Test additions (231 → 234)
+
+- `test_content_kinds.py` — 21 cases covering each kind's positive
+  case + the boundary where it falls through to a different kind
+- `test_v2_to_v3_migration_classifies_existing_messages` — load-bearing
+  migration test: starts from a hand-built v2 schema, asserts every
+  row gets classified after auto-migrate
+- `test_topics_excludes_harness_procedural_tool_result` — direct
+  proof that the THOUGHT filter excludes the other three kinds
+- `test_topics_includes_null_content_kind_rows` — NULL-tolerance
+  for partially-migrated DBs
+- `test_kind_filter_scopes_to_requested_kinds` — `search --kind`
+  positive case across all four kinds with the same FTS term
+
+[issue #27]: https://github.com/LearnedGeek/claude-recall/issues/27
+
 ## v0.7.2 — 2026-04-29
 
 Cross-project boost on `search --semantic`. Closes the v0.7 trilogy

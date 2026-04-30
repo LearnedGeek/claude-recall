@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from . import content_kinds
 from .storage import content_hash
 
 
@@ -272,6 +273,7 @@ def _index_file(
                     idx,
                     m["timestamp"],
                     new_hashes[idx],
+                    content_kinds.classify(m["content"], m["role"]),
                 )
                 for idx, m in enumerate(messages)
                 if idx not in surviving_indices
@@ -279,8 +281,8 @@ def _index_file(
             if new_inserts:
                 conn.executemany(
                     "INSERT INTO messages(session_id, role, content, "
-                    "turn_index, timestamp, content_hash) "
-                    "VALUES (?,?,?,?,?,?)",
+                    "turn_index, timestamp, content_hash, content_kind) "
+                    "VALUES (?,?,?,?,?,?,?)",
                     new_inserts,
                 )
 
@@ -320,8 +322,8 @@ def _index_file(
             if messages:
                 conn.executemany(
                     "INSERT INTO messages(session_id, role, content, "
-                    "turn_index, timestamp, content_hash) "
-                    "VALUES (?,?,?,?,?,?)",
+                    "turn_index, timestamp, content_hash, content_kind) "
+                    "VALUES (?,?,?,?,?,?,?)",
                     [
                         (
                             session_id,
@@ -330,6 +332,7 @@ def _index_file(
                             m["turn_index"],
                             m["timestamp"],
                             new_hashes[idx],
+                            content_kinds.classify(m["content"], m["role"]),
                         )
                         for idx, m in enumerate(messages)
                     ],

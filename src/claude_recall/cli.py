@@ -148,6 +148,17 @@ def build_parser() -> argparse.ArgumentParser:
             "silently no-op when --project is set."
         ),
     )
+    p_search.add_argument(
+        "--kind",
+        action="append",
+        choices=["THOUGHT", "PROCEDURAL", "HARNESS", "TOOL_RESULT_EMBEDDED"],
+        help=(
+            "Scope to one or more content kinds (issue #27). May be passed "
+            "multiple times to include multiple kinds (e.g., --kind THOUGHT "
+            "--kind PROCEDURAL). Defaults to all kinds — search results "
+            "are not filtered by kind unless this flag is given."
+        ),
+    )
 
     # show
     p_show = sub.add_parser("show", help="Fetch a session's full transcript.")
@@ -524,6 +535,7 @@ def _cmd_search(args: argparse.Namespace, cfg: Config) -> int:
                 ollama_client=ollama_client,
                 rerank_pool_size=cfg.embeddings.rerank_pool_size,
                 cross_project_boost=args.cross_project_boost,
+                kinds=args.kind,
             )
         except search.SearchError as exc:
             print(f"invalid query: {exc}", file=sys.stderr)

@@ -54,6 +54,14 @@ LABEL_TOP_TERMS = 3
 SAMPLE_MESSAGES_PER_CLUSTER = 3
 PREVIEW_CHARS = 200
 
+# v0.8 (issue #27, Fix 2): suppress words from labels that appear in more
+# than this fraction of clusters. The previous threshold ("appears in
+# EVERY cluster") was binary and let near-universal words like "files",
+# "check", "verify" survive into labels. 0.5 is the v0.8 tuning point —
+# tighten further if conversational mechanics still bleed through after
+# the THOUGHT-only filter (Fix 1) shrinks the pool.
+LABEL_CLUSTER_UNIQUENESS_THRESHOLD = 0.5
+
 _TOKEN_PATTERN = re.compile(r"[a-z][a-z0-9]+")
 
 # v0.7.1 --since: shorthand `\d+[dwmy]` (days/weeks/months/years). Months
@@ -174,7 +182,16 @@ def run_topics(
         JOIN messages m ON m.msg_id = v.msg_id
         JOIN sessions s ON s.session_id = m.session_id
     """
-    where_clauses: list[str] = []
+    # v0.8 (issue #27): scope to THOUGHT-kind messages. HARNESS,
+    # PROCEDURAL, and TOOL_RESULT_EMBEDDED are pre-classified at index
+    # time and excluded from the topic-mining pool. NULL handling: rows
+    # whose content_kind is NULL haven't been classified yet (e.g.,
+    # interrupted migration); we include them with the same opt-in
+    # discipline as v0.7 to avoid silently dropping otherwise-valid
+    # data, and the post-migration backfill normally fills these in.
+    where_clauses: list[str] = [
+        "(m.content_kind = 'THOUGHT' OR m.content_kind IS NULL)"
+    ]
     params: list = []
     if project_slug:
         where_clauses.append("LOWER(s.project_slug) = LOWER(?)")
@@ -184,8 +201,7 @@ def run_topics(
         # per-message timestamp capture and can't be confidently dated.
         where_clauses.append("m.timestamp IS NOT NULL AND m.timestamp >= ?")
         params.append(since.isoformat())
-    if where_clauses:
-        sql += " WHERE " + " AND ".join(where_clauses)
+    sql += " WHERE " + " AND ".join(where_clauses)
     sql += " ORDER BY m.msg_id"
 
     since_iso = since.isoformat() if since is not None else None
@@ -316,13 +332,21 @@ def run_topics(
             doc_freq[word] = doc_freq.get(word, 0) + 1
 
     num_clusters = len(qualifying_clusters)
+    # v0.8 (Fix 2): max document frequency a word may have to remain
+    # eligible for a cluster label. The previous threshold filtered only
+    # words appearing in EVERY cluster — too lax, conversational
+    # mechanics ("check", "files", "verify") survived. With the THOUGHT
+    # filter (Fix 1) already shrinking the pool, holding this at 50%
+    # cluster-uniqueness gives sharp labels without starving small
+    # corpora that have legitimately broad distinctive terms.
+    df_max_eligible = max(1, int(num_clusters * LABEL_CLUSTER_UNIQUENESS_THRESHOLD))
     cluster_labels: list[str] = []
     for tf in cluster_term_freqs:
         scored: list[tuple[str, float]] = []
         for word, freq in tf.items():
             df = doc_freq[word]
-            if df >= num_clusters:
-                # Word appears in every cluster — not distinctive.
+            if df > df_max_eligible:
+                # Word appears in too many clusters to be distinctive.
                 continue
             idf = math.log(num_clusters / df)
             scored.append((word, freq * idf))
