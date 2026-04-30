@@ -2,6 +2,83 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.8.1 — 2026-04-29
+
+PROCEDURAL classifier extensions for residual agent-action narrators
+flagged by LearnedGeek Claude after v0.8.0 mining pass.
+
+### Added patterns
+
+Longer-form action narrators that escaped the v0.8.0 short-title
+"Now Foo:" regex:
+
+- `now adding…` / `now removing…` / `now updating…` / `now fixing…` /
+  `now implementing…` / `now wiring…` / `now writing…` / `now creating…`
+- `now i need to…` / `now i'm going to…`
+- `i need to add…` / `i need to remove…` / `i need to update…` /
+  `i need to fix…` / `i need to check…` / `i need to verify…` /
+  generic `i need to…`
+- `need to add…` / `need to remove…` / `need to update…` /
+  `need to fix…` / `need to check…` / `need to verify…` /
+  `need to implement…` / `need to write…`
+
+User-role messages with these phrases stay THOUGHT — PROCEDURAL gates
+on assistant role only. A user saying "I need to add a payment provider"
+is describing a task; an assistant saying it is narrating an action.
+
+### Empirical
+
+On the 50,140-message LearnedGeek archive: 366 additional messages
+re-classified from THOUGHT to PROCEDURAL. The residual cluster #1
+(`warmup / canvas / register`) that LG flagged dropped from 616 → 583
+messages but didn't disappear — analysis of the remaining 583 shows
+they're mostly genuine substantive content (compensation discussions,
+architecture reviews, Azure setup) clustered by embedding similarity
+with a misleading TF-IDF label, not procedural noise. Further
+ranking improvements there are a Fix-2 (stricter IDF) or v0.9
+(multi-label) concern, not classifier territory.
+
+### Where this leaves the workflow
+
+The blog mining workflow is now substantively unblocked. LG Claude's
+v0.8.0 audit identified 4/10 topical candidates in the top 10
+(`crewtrack / maui / line`, `google / site / page`, `ssh / scalar /
+powershell`, `app / azure / worker`) and surprise-value candidates
+further down (`kevin / attorney / letter`, `scan / threshold / stocks`,
+`schema / migration / migrations`). v0.8.1 sharpens the rest of the
+top 15 without changing the architectural shape.
+
+### Migration
+
+Strictly additive. No schema change, no re-embed, no hook reinstall.
+**However**, the new classifier patterns only fire at message-insert
+time — existing `content_kind` values from v0.8.0 are not
+auto-reclassified by `claude-recall index` (the indexer only re-runs
+classify() on content-changed rows via the v0.6 hash-diff path). New
+messages get the new rules automatically; old messages keep their
+v0.8.0 classification.
+
+To force a full reclassification of an existing v0.8.0 archive:
+
+```python
+import sqlite3
+from claude_recall import content_kinds
+conn = sqlite3.connect(<your db path>)
+conn.row_factory = sqlite3.Row
+rows = conn.execute("SELECT msg_id, content, role FROM messages").fetchall()
+conn.executemany(
+    "UPDATE messages SET content_kind = ? WHERE msg_id = ?",
+    [(content_kinds.classify(r["content"], r["role"]), r["msg_id"]) for r in rows],
+)
+conn.commit()
+```
+
+A first-class `claude-recall reclassify` subcommand is on the v0.8.x
+roadmap but isn't blocking — the patterns are pragmatic and tunable,
+so the expected case is "user re-classifies once after a tuning round
+they care about." Most users see the v0.8.0 + new-message classification
+behavior and that's enough.
+
 ## v0.8.0 — 2026-04-29
 
 **Content-kind tier separation.** Closes [issue #27]. The architectural

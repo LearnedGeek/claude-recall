@@ -127,6 +127,36 @@ _PROCEDURAL_OPENERS = (
     "great, let me ",
     "got it! ",
     "got it. ",
+    # v0.8.1: agent action-narrator patterns flagged by LG Claude. These
+    # are longer-form announcements ("Now adding X to Y", "Need to add Z")
+    # that escape the short "Now Foo:" title regex but are structurally
+    # the same procedural signal — agent telling you what it's doing
+    # next, not topical content.
+    "now adding ",
+    "now removing ",
+    "now updating ",
+    "now fixing ",
+    "now implementing ",
+    "now wiring ",
+    "now writing ",
+    "now creating ",
+    "now i need to ",
+    "now i'm going to ",
+    "i need to add ",
+    "i need to remove ",
+    "i need to update ",
+    "i need to fix ",
+    "i need to check ",
+    "i need to verify ",
+    "i need to ",
+    "need to add ",
+    "need to remove ",
+    "need to update ",
+    "need to fix ",
+    "need to check ",
+    "need to verify ",
+    "need to implement ",
+    "need to write ",
 )
 
 # PROCEDURAL — short title/announcement pattern: assistant messages that

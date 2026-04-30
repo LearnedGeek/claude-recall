@@ -123,6 +123,38 @@ def test_analysis_block_opener_is_harness():
     assert content_kinds.classify(content, role="assistant") == content_kinds.HARNESS
 
 
+def test_now_adding_action_narrator_is_procedural():
+    """v0.8.1: 'Now adding X to Y' is a longer-form action narrator
+    that the short title regex doesn't catch. Flagged by LG Claude as
+    the residual cluster #1 after v0.8.0 shipped."""
+    content = (
+        "Now adding the warmup state to the canvas register so the "
+        "cycle starts in the correct phase."
+    )
+    assert content_kinds.classify(
+        content, role="assistant"
+    ) == content_kinds.PROCEDURAL
+
+
+def test_need_to_add_is_procedural():
+    """'Need to add X' / 'I need to add X' agent action announcements."""
+    for content in (
+        "Need to add the migration step before the backfill runs.",
+        "I need to verify the build is clean before committing.",
+        "I need to check whether the index already exists.",
+    ):
+        assert content_kinds.classify(
+            content, role="assistant"
+        ) == content_kinds.PROCEDURAL, f"{content!r} should be PROCEDURAL"
+
+
+def test_user_role_with_need_to_stays_thought():
+    """'I need to add X' from the user is THOUGHT — they're describing
+    a task, not narrating an action. PROCEDURAL gates on assistant role."""
+    content = "I need to add a new payment provider integration. What's the cleanest pattern?"
+    assert content_kinds.classify(content, role="user") == content_kinds.THOUGHT
+
+
 def test_message_mentioning_wrapper_tag_inline_is_not_harness():
     """A user message that *talks about* a wrapper tag without being one
     must not be misclassified. We anchor on the start of the trimmed
