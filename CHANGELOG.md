@@ -2,6 +2,67 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.8.4 — 2026-05-02
+
+`claude-recall reclassify` — re-run the content-kind classifier across
+the existing index. Closes the upgrade-path gap in the v0.8 series:
+classifier tunings (new HARNESS patterns, new PROCEDURAL openers, etc.)
+no longer require a full `index --rebuild` to apply retroactively to
+already-indexed messages.
+
+### When to use
+
+After upgrading to a release with new classifier patterns. The v0.6
+indexer's hash-diff logic skips re-classification when content hasn't
+changed (which is right for ingest performance), so old rows keep
+their old `content_kind` value. `reclassify` walks the messages
+table, re-runs the classifier against current content + role, and
+writes the new value where the verdict differs.
+
+### Usage
+
+```bash
+claude-recall reclassify              # full corpus
+claude-recall reclassify --project <slug>   # one project only
+claude-recall reclassify --dry-run    # preview deltas without writing
+```
+
+Output shows pre/post distribution per kind plus the changed-row total:
+
+```
+Reclassified 51,549 messages (full corpus)
+
+  HARNESS                 3,207 →   3,343  (+136)
+  PROCEDURAL             19,855 →  20,485  (+630)
+  THOUGHT                27,883 →  27,110  (-773)
+  TOOL_RESULT_EMBEDDED      609 →     611  (+2)
+
+768 rows updated.
+```
+
+Idempotent: re-running with the same classifier code is a no-op
+(reports zero changes). Reversible: a future re-tune can roll
+verdicts back if the new patterns are wrong for some content.
+
+### Tests (246 → 254)
+
+- `test_reclassify_updates_changed_rows` — three deliberately mis-labeled
+  rows reach correct verdicts
+- `test_reclassify_skips_already_correct_rows` — idempotence
+- `test_reclassify_dry_run_does_not_write` — preview-only
+- `test_reclassify_scopes_to_project` — `--project` slug filter
+- `test_reclassify_handles_null_kind_rows` — partial-migration tolerance
+- `test_reclassify_format_report_shows_deltas` — CLI output shape
+- `test_reclassify_dry_run_format_report_says_no_writes`
+- `test_reclassify_empty_archive_returns_zero` — empty-corpus safety
+
+### Migration
+
+Strictly additive. New subcommand. No schema change, no re-embed,
+no hook reinstall. Run once after upgrading from v0.8.0/v0.8.1/v0.8.2/v0.8.3
+to get the v0.8.1 PROCEDURAL extensions retroactively applied to your
+archive.
+
 ## v0.8.3 — 2026-04-30
 
 Documentation fix to `CONFIG_TEMPLATE` — the commented config.toml

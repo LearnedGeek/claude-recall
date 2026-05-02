@@ -245,6 +245,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Preview the migration without making changes.",
     )
 
+    # reclassify (v0.8.4)
+    p_reclassify = sub.add_parser(
+        "reclassify",
+        help=(
+            "Re-run the content-kind classifier across the existing index. "
+            "Use after upgrading to a release with new classifier patterns "
+            "to retroactively apply them to already-indexed messages."
+        ),
+    )
+    p_reclassify.add_argument(
+        "--project",
+        help="Scope to one project slug (default: full corpus).",
+    )
+    p_reclassify.add_argument(
+        "--dry-run", action="store_true",
+        help="Preview the deltas without writing.",
+    )
+
     return parser
 
 
@@ -284,6 +302,7 @@ def main(argv: list[str] | None = None) -> int:
         "embed": _cmd_embed,
         "topics": _cmd_topics,
         "migrate": _cmd_migrate,
+        "reclassify": _cmd_reclassify,
     }
     return handlers[args.command](args, cfg)
 
@@ -526,6 +545,30 @@ def _cmd_migrate(args: argparse.Namespace, cfg: Config) -> int:
         conn.close()
 
     print(_migrate.format_report(report))
+    return 0
+
+
+# --- reclassify -------------------------------------------------------------
+
+def _cmd_reclassify(args: argparse.Namespace, cfg: Config) -> int:
+    from . import reclassify as _reclassify
+
+    try:
+        conn = storage.open_db(cfg.db_path)
+    except storage.StorageError as exc:
+        print(f"database error: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        report = _reclassify.run_reclassify(
+            conn,
+            project_slug=args.project,
+            dry_run=args.dry_run,
+        )
+    finally:
+        conn.close()
+
+    print(_reclassify.format_report(report))
     return 0
 
 
