@@ -2,6 +2,123 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.9.2 — 2026-05-21
+
+`claude-recall doctor` — diagnose hook wiring drift in
+`.claude/settings.json`. Closes [issue #30].
+
+### Background
+
+When a project's `settings.json` drifts from the canonical shape
+`init-hooks` emits — typically via hand-editing alongside other hooks,
+or via upgrade-leftover stale paths — the claude-recall hook can
+silently stop firing. Claude Code's strict-validation pass rejects the
+malformed entry without error, log line, or fallback. The user-visible
+symptom is "claude-recall context isn't being injected," which looks
+like any of a dozen unrelated things (search threshold, indexing,
+embeddings…). The actual cause (hook-not-wired) is invisible without
+filesystem-level instrumentation.
+
+OC hit this exact failure during the v0.9.0 intervention-channel
+rollout in ANI — 30-45 min of filesystem archaeology to confirm the
+hook was never being invoked.
+
+### What `doctor` catches
+
+```bash
+claude-recall doctor                          # checks current directory's .claude/settings.json
+claude-recall doctor --project-root <path>    # explicit project root
+```
+
+The check validates each hook entry in the project's settings.json
+against the schema claude-recall's `init-hooks` emits:
+
+- **Flat shape drift** — top-level `command` instead of the nested
+  `hooks: [...]` array Claude Code's strict-validation pass requires.
+  This is the exact failure mode that prompted issue #30.
+- **Missing `type: "command"`** field on inner entries.
+- **Missing `shell:` field** on `.ps1` / `.sh` commands — Claude Code's
+  default shell (bash on POSIX) can't execute PowerShell scripts
+  without it.
+- **Stale command paths** — commands pointing at filesystem paths that
+  don't exist. Common after package upgrades that moved binaries, or
+  after project relocation without `claude-recall migrate`.
+- **Top-level structural issues** — missing `hooks` block, malformed
+  JSON, wrong root type.
+
+Entry-point invocations like `claude-recall emit-prompt-context
+--__cr-managed` are recognized as non-path commands and not flagged.
+
+### Exit codes
+
+| Exit | Meaning | Usage |
+|---|---|---|
+| 0 | All checks pass | CI-friendly green |
+| 1 | Warnings only (no hooks block, etc.) | Worth a look, not broken |
+| 2 | Errors (will silently break hooks) | Fix before continuing |
+
+### Output
+
+Human-readable findings with `[OK]` / `[WARN]` / `[ERROR]` severity,
+event name, message, and detail line. Example post-issue-#30 ANI
+state:
+
+```
+settings: E:\...\AmbientNaturalIntelligence\.claude\settings.json
+
+[OK   ] (top-level): all hook entries validate cleanly
+
+summary: OK
+```
+
+Example with a flat-shape drift (the issue #30 failure mode):
+
+```
+[ERROR] UserPromptSubmit: entry #0 uses flat shape (top-level `command`)
+        instead of the nested `hooks: [...]` array Claude Code's strict
+        parser requires
+        command: 'E:\\path\\to\\on_prompt.ps1'. Wrap in
+        `{ "hooks": [{ "type": "command", "command": ... }] }`.
+        Run `init-hooks --force` to regenerate, or fix by hand.
+```
+
+### Deferred to v0.9.3+
+
+- **`--fix` flag** — auto-correct via `init-hooks --force` semantics,
+  preserving user-added sibling commands.
+- **`--trace` flag** — append file-logging instrumentation to the hook
+  script and run a verification cycle ("send a prompt, then re-run
+  doctor --verify to confirm the hook is firing").
+
+Both are useful follow-ons but not blocking — `doctor` already turns
+the issue-#30 failure class into a 5-second CLI check.
+
+### Tests (272 → 285, +13)
+
+- `test_doctor_reports_missing_settings_file`
+- `test_doctor_reports_malformed_json`
+- `test_doctor_warns_when_no_hooks_block`
+- `test_doctor_passes_clean_canonical_shape`
+- `test_doctor_catches_flat_shape_drift` — the #30 root cause
+- `test_doctor_catches_missing_shell_field_on_ps1`
+- `test_doctor_catches_stale_command_path`
+- `test_doctor_catches_missing_type_field`
+- `test_doctor_naked_claude_recall_invocation_does_not_path_check`
+- `test_doctor_format_report_includes_severity_counts`
+- `test_doctor_cli_returns_2_on_errors`
+- `test_doctor_cli_returns_0_on_clean`
+- `test_doctor_cli_returns_1_on_warnings_only`
+
+Verified against the real ANI and claude-recall project settings —
+both validate clean post-v0.9.0/v0.9.1 migration.
+
+### Migration
+
+Strictly additive. New subcommand. No schema change, no re-embed, no
+hook reinstall.
+
+[issue #30]: https://github.com/LearnedGeek/claude-recall/issues/30
+
 ## v0.9.1 — 2026-05-21
 
 Closes [issue #14] — long-open "pre-compact hook" enhancement from

@@ -280,6 +280,23 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
 
+    # doctor (v0.9.2, issue #30)
+    p_doctor = sub.add_parser(
+        "doctor",
+        help=(
+            "Diagnose hook wiring drift in the project's .claude/settings.json. "
+            "Catches the silent-failure mode where a hook is wired with the "
+            "wrong schema and never fires."
+        ),
+    )
+    p_doctor.add_argument(
+        "--project-root",
+        help=(
+            "Project root containing .claude/settings.json. Defaults to "
+            "the current directory."
+        ),
+    )
+
     # reclassify (v0.8.4)
     p_reclassify = sub.add_parser(
         "reclassify",
@@ -339,6 +356,7 @@ def main(argv: list[str] | None = None) -> int:
         "migrate": _cmd_migrate,
         "reclassify": _cmd_reclassify,
         "emit-prompt-context": _cmd_emit_prompt_context,
+        "doctor": _cmd_doctor,
     }
     return handlers[args.command](args, cfg)
 
@@ -707,6 +725,23 @@ def _cmd_migrate(args: argparse.Namespace, cfg: Config) -> int:
         conn.close()
 
     print(_migrate.format_report(report))
+    return 0
+
+
+# --- doctor -----------------------------------------------------------------
+
+def _cmd_doctor(args: argparse.Namespace, cfg: Config) -> int:
+    from . import doctor as _doctor
+
+    project_root = (
+        Path(args.project_root).expanduser() if args.project_root else Path.cwd()
+    )
+    report = _doctor.run_doctor(project_root)
+    print(_doctor.format_report(report))
+    if report.has_errors:
+        return 2
+    if report.has_warnings:
+        return 1
     return 0
 
 
