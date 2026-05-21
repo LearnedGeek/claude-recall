@@ -395,6 +395,42 @@ def _format_json(response: SearchResponse) -> str:
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
+def build_agent_context_text(response: SearchResponse) -> str:
+    """Build the plain-text additionalContext content (no JSON wrapper).
+
+    Extracted from _format_agent_context so the hook composer (emit-prompt-
+    context subcommand, issue #29) can prepend interventions content to the
+    same body before wrapping. Returns empty string when no results, so
+    callers can compose conditionally.
+    """
+    if not response.results:
+        return ""
+    lines = ["Relevant prior-session context (claude-recall):", ""]
+    for r in response.results:
+        date_part = (r.started_at or "")[:10]
+        short_id = r.session_id[:8]
+        clean = _strip_marks(r.snippet)
+        lines.append(f"[Session {short_id}, {date_part}] {r.role}: {clean}")
+    return "\n".join(lines)
+
+
+def wrap_agent_context_payload(text: str) -> str:
+    """Wrap pre-built additionalContext text in the canonical hookSpecificOutput
+    envelope. Issue #21 (v0.6.4) covers why we must emit the wrapped shape.
+
+    Empty input → ``"{}"`` (the hook treats this as a no-op).
+    """
+    if not text:
+        return "{}"
+    payload = {
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": text,
+        }
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def _format_agent_context(response: SearchResponse) -> str:
     """Emit the Claude Code hook JSON in the canonical wrapped form.
 
@@ -412,21 +448,7 @@ def _format_agent_context(response: SearchResponse) -> str:
 
     Empty ``{}`` when there are no results — the hook treats this as a no-op.
     """
-    if not response.results:
-        return "{}"
-    lines = ["Relevant prior-session context (claude-recall):", ""]
-    for r in response.results:
-        date_part = (r.started_at or "")[:10]
-        short_id = r.session_id[:8]
-        clean = _strip_marks(r.snippet)
-        lines.append(f"[Session {short_id}, {date_part}] {r.role}: {clean}")
-    payload = {
-        "hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": "\n".join(lines),
-        }
-    }
-    return json.dumps(payload, ensure_ascii=False)
+    return wrap_agent_context_payload(build_agent_context_text(response))
 
 
 def _format_text(response: SearchResponse) -> str:

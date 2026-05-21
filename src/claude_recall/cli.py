@@ -258,6 +258,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Preview the migration without making changes.",
     )
 
+    # emit-prompt-context (v0.9.0, issue #29)
+    # The hook composer subcommand. Reads stdin (prompt envelope from
+    # Claude Code), produces the wrapped hookSpecificOutput JSON, and
+    # optionally prepends interventions content when configured. Intended
+    # to be invoked by init-hooks-emitted hook commands; users rarely
+    # invoke it directly.
+    p_emit = sub.add_parser(
+        "emit-prompt-context",
+        help=(
+            "Hook composer: read prompt JSON from stdin, emit wrapped "
+            "additionalContext combining interventions (if configured) + "
+            "claude-recall search results."
+        ),
+    )
+    # Hidden no-op flag matching the binary marker (issue #26). init-hooks
+    # emits `claude-recall emit-prompt-context --__cr-managed` so the strip
+    # function in `init-hooks --force` recognizes the command as ours.
+    p_emit.add_argument(
+        "--__cr-managed", action="store_true", dest="_cr_managed",
+        help=argparse.SUPPRESS,
+    )
+
     # reclassify (v0.8.4)
     p_reclassify = sub.add_parser(
         "reclassify",
@@ -316,6 +338,7 @@ def main(argv: list[str] | None = None) -> int:
         "topics": _cmd_topics,
         "migrate": _cmd_migrate,
         "reclassify": _cmd_reclassify,
+        "emit-prompt-context": _cmd_emit_prompt_context,
     }
     return handlers[args.command](args, cfg)
 
@@ -527,6 +550,132 @@ def _cmd_topics(args: argparse.Namespace, cfg: Config) -> int:
         conn.close()
 
     print(_topics.format_topics(response, format=args.format), end="")
+    return 0
+
+
+# --- emit-prompt-context ----------------------------------------------------
+
+# Separator used to join interventions + recall blocks in additionalContext.
+# Matches the convention OC's ANI project established in its hand-rolled
+# on_prompt.ps1 (`\n\n---\n\n`), so the agent-visible output looks identical
+# whether the merge happens via the managed hook or the legacy script.
+_HOOK_MERGE_SEPARATOR = "\n\n---\n\n"
+
+
+def _read_interventions_text(cfg: Config) -> str:
+    """Read the configured interventions file and return its stripped content.
+
+    Returns empty string when:
+      - inject_interventions is false
+      - The file is missing
+      - The file is empty or whitespace-only
+      - Any I/O error occurs (failure policy: never block the prompt)
+
+    Resolution rules:
+      - Absolute path: used as-is.
+      - Relative path: resolved against cwd at invocation time. Claude Code
+        invokes hooks with cwd set to the project root, so a default of
+        `.claude/hooks/interventions.md` lands at the per-project file.
+    """
+    if not cfg.hooks.inject_interventions:
+        return ""
+    raw_path = cfg.hooks.interventions_path
+    if not raw_path:
+        return ""
+    p = Path(raw_path)
+    if not p.is_absolute():
+        p = Path.cwd() / p
+    try:
+        content = p.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    return content.strip()
+
+
+def _cmd_emit_prompt_context(args: argparse.Namespace, cfg: Config) -> int:
+    """Hook composer: stdin prompt envelope → wrapped additionalContext.
+
+    Failure policy: any unrecoverable error → print '{}' and exit 0. The
+    hook must never block user prompts even when the index is missing,
+    the interventions file is broken, or Ollama is down.
+    """
+    # 1. Read the prompt envelope from stdin.
+    try:
+        raw = sys.stdin.read()
+    except (OSError, UnicodeDecodeError):
+        print("{}")
+        return 0
+    if not raw.strip():
+        print("{}")
+        return 0
+    try:
+        envelope = json.loads(raw)
+    except json.JSONDecodeError:
+        print("{}")
+        return 0
+    prompt = envelope.get("prompt") if isinstance(envelope, dict) else None
+    if not prompt or not isinstance(prompt, str):
+        print("{}")
+        return 0
+
+    # 2. Read interventions (no-op when inject_interventions=false).
+    interventions_text = _read_interventions_text(cfg)
+
+    # 3. Run the search using hook-mode parameters (matches the canonical
+    #    on_prompt.ps1/sh invocation: project auto, from-config thresholds,
+    #    keyword extraction, semantic rerank when configured).
+    recall_text = ""
+    try:
+        conn = storage.open_db(cfg.db_path)
+        try:
+            project_slug = projects.resolve_project_slug(conn)
+            ollama_client = None
+            semantic = bool(
+                cfg.embeddings.enabled and cfg.embeddings.use_in_hook
+            )
+            if semantic:
+                try:
+                    ollama_client = _ollama_client_factory(
+                        cfg.embeddings.ollama_base_url,
+                        cfg.embeddings.model,
+                        cfg.embeddings.request_timeout_seconds,
+                        keep_alive=cfg.embeddings.keep_alive,
+                    )
+                except Exception:  # noqa: BLE001
+                    semantic = False
+
+            try:
+                response = search.run_search(
+                    conn,
+                    query=prompt,
+                    days=cfg.search.hook_days,
+                    limit=cfg.search.hook_limit,
+                    project_slug=project_slug,
+                    threshold=cfg.search.hook_threshold,
+                    extract_keywords=True,  # mirrors --extract-keywords from canonical hook
+                    semantic=semantic,
+                    ollama_client=ollama_client,
+                    rerank_pool_size=cfg.embeddings.rerank_pool_size,
+                )
+                recall_text = search.build_agent_context_text(response)
+            finally:
+                if ollama_client is not None:
+                    ollama_client.close()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        # Storage/search failure: silently fall back to interventions-only
+        # (or empty) output. Hook must not block the prompt.
+        recall_text = ""
+
+    # 4. Compose final additionalContext: interventions first (load-bearing,
+    #    so the agent sees them BEFORE drafting), recall second
+    #    (informational). Skip the separator when either side is empty.
+    parts = [p for p in (interventions_text, recall_text) if p]
+    if not parts:
+        print("{}")
+        return 0
+    print(search.wrap_agent_context_payload(_HOOK_MERGE_SEPARATOR.join(parts)))
     return 0
 
 
@@ -1588,8 +1737,25 @@ def _cmd_init_hooks(args: argparse.Namespace, cfg: Config) -> int:
         )
         session_start_cmd = None
 
-    # UserPromptSubmit: prefer the binary when present, fall back to shell.
-    if have_binary:
+    # UserPromptSubmit selection:
+    #   - inject_interventions=true → Python `emit-prompt-context` (#29)
+    #     (the binary fast-path doesn't know about interventions; rather
+    #     than fork a C# rewrite, route this opt-in feature through Python).
+    #   - else, prefer the binary when present, fall back to shell.
+    if cfg.hooks.inject_interventions:
+        # v0.9.0 (issue #29): Python composer handles intervention merge.
+        # Recognized as managed via the `emit-prompt-context` fragment.
+        on_prompt_cmd = "claude-recall emit-prompt-context --__cr-managed"
+        # Also copy the fallback script so the hooks dir layout is
+        # consistent — if a user later flips inject_interventions back to
+        # false and runs init-hooks --force, the binary path can pick up.
+        # No correctness impact.
+        if not have_binary:
+            _copy_if_present(
+                on_prompt_src, hooks_dir / on_prompt_name,
+                label="UserPromptSubmit hook (fallback)",
+            )
+    elif have_binary:
         exe_dst = hooks_dir / "claude-recall-hook.exe"
         if exe_dst.exists() and not args.force:
             print(
@@ -1817,6 +1983,21 @@ CONFIG_TEMPLATE = '''# claude-recall configuration
 #                                         # "yesterday", "next week" need to
 #                                         # resolve to a real wall-clock value.
 #                                         # Off by default; opt in per project.
+#
+# inject_interventions = false            # When true, the managed UserPromptSubmit
+#                                         # hook reads `interventions_path` and
+#                                         # prepends its content to additionalContext
+#                                         # alongside the recall search result. Use
+#                                         # for project-specific behavioral cues you
+#                                         # want the agent to see BEFORE drafting —
+#                                         # structural injection beats runtime
+#                                         # memory recall. Off by default.
+# interventions_path = ".claude/hooks/interventions.md"
+#                                         # Path to the interventions file.
+#                                         # Relative paths resolve against cwd at
+#                                         # hook-firing time (= project root).
+#                                         # Absolute paths used as-is. claude-recall
+#                                         # reads this file but never writes to it.
 
 # Semantic rerank via Ollama embeddings. Off by default so the tool works
 # zero-dep. To turn on:
@@ -1852,11 +2033,12 @@ def _read_installed_hook_version(project_root: Path | None = None) -> str | None
 # as a fallback so we still recognize hooks emitted by pre-v0.6.8 versions
 # that don't have the marker.
 _CLAUDE_RECALL_OWNED_FRAGMENTS = (
-    "claude-recall-hook",  # v0.4+ NativeAOT binary (Windows .exe + future)
-    "session_start.ps1",   # SessionStart on Windows
-    "session_start.sh",    # SessionStart on POSIX
-    "on_prompt.ps1",       # v0.3 UserPromptSubmit fallback (Windows)
-    "on_prompt.sh",        # v0.3 UserPromptSubmit fallback (POSIX)
+    "claude-recall-hook",        # v0.4+ NativeAOT binary (Windows .exe + future)
+    "session_start.ps1",         # SessionStart on Windows
+    "session_start.sh",          # SessionStart on POSIX
+    "on_prompt.ps1",             # v0.3 UserPromptSubmit fallback (Windows)
+    "on_prompt.sh",              # v0.3 UserPromptSubmit fallback (POSIX)
+    "emit-prompt-context",       # v0.9.0 hook composer (Python path when inject_interventions=true)
 )
 
 

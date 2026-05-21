@@ -67,6 +67,18 @@ class HooksConfig:
     # without touching any user-managed sibling hooks.
     inject_time: bool = False
 
+    # Issue #29 (v0.9.0): when true, the managed UserPromptSubmit hook
+    # reads `interventions_path` (project-relative by default) and
+    # prepends its content to the additionalContext alongside the recall
+    # search result. Architectural pattern: structural channel injection
+    # puts the content in the context window BEFORE pattern recognition
+    # + recall happens, so the agent literally cannot draft without
+    # seeing it. Third deployment of the cross-project tier-separation
+    # pattern (ANI memory tiers → claude-recall content_kind classifier
+    # → this). Default false — opt-in only, additive.
+    inject_interventions: bool = False
+    interventions_path: str = ".claude/hooks/interventions.md"
+
 
 @dataclass
 class Config:
@@ -148,6 +160,14 @@ def _load_toml(path: Path) -> Config:
     inject_time = _dig(data, "hooks", "inject_time")
     if inject_time is not None:
         cfg.hooks.inject_time = bool(inject_time)
+
+    inject_interventions = _dig(data, "hooks", "inject_interventions")
+    if inject_interventions is not None:
+        cfg.hooks.inject_interventions = bool(inject_interventions)
+
+    interventions_path = _dig(data, "hooks", "interventions_path")
+    if isinstance(interventions_path, str):
+        cfg.hooks.interventions_path = interventions_path
 
     return cfg
 

@@ -2,6 +2,150 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.9.0 — 2026-05-21
+
+**Structural intervention injection in the UserPromptSubmit hook.** Closes
+[issue #29]. The third deployment of the same architectural pattern that
+shaped ANI Runtime's memory-tier separation (Facts/Episodic/Interior)
+and claude-recall's own v0.8 content-kind classifier
+(THOUGHT/PROCEDURAL/HARNESS/TOOL_RESULT_EMBEDDED): **classify content kind
+at the source, give each kind its own query surface, do not filter at
+runtime**.
+
+This release moves the structural-intervention pattern out of project-local
+`on_prompt.ps1` hand-rolling (where it lived in ANI from May 11 onward)
+and into claude-recall as a managed feature.
+
+### The architectural principle
+
+Passive memory files (per-project `memory/*.md`, `CLAUDE.md`, etc.) require
+the agent to remember to check them. Pattern recognition happens *before*
+memory recall — by the time the agent thinks "let me check what I've
+learned about this," it's already drafted a response in the wrong shape.
+
+Structural channel injection puts the content into the context window
+*before* drafting happens. The agent literally cannot draft without
+seeing it. Same shape as the `JSON output beats pattern detection in the
+underlying agent's code` principle from ANI's Theme M migration.
+
+### `[hooks].inject_interventions` config setting
+
+```toml
+# config.toml
+[hooks]
+inject_interventions = true
+interventions_path   = ".claude/hooks/interventions.md"  # default
+```
+
+When `inject_interventions = true`, the managed UserPromptSubmit hook reads
+`interventions_path` (project-relative by default) and prepends its content
+to `additionalContext` alongside the claude-recall search result. Both
+blocks are joined with `\n\n---\n\n` so they read distinctly.
+
+| Scenario | Behavior |
+|---|---|
+| flag true, file exists with content | interventions + separator + recall in additionalContext |
+| flag true, file missing | recall-only output, no error |
+| flag true, file blank/whitespace | same as missing |
+| flag false (default) | identical to pre-v0.9 hook behavior |
+| flag true, recall empty + file has content | interventions only, no separator |
+| `init-hooks --force` with flag true | hook re-emitted with marker; intervention file untouched |
+
+**Load-bearing principle:** claude-recall reads the interventions file
+but never writes to it. Editing is the user's responsibility.
+
+### New subcommand: `claude-recall emit-prompt-context`
+
+The hook composer. Reads a prompt envelope from stdin, runs the recall
+search, optionally reads + prepends interventions, and emits the wrapped
+`hookSpecificOutput` JSON. Users rarely invoke it directly — `init-hooks`
+wires it up when `inject_interventions = true`.
+
+```bash
+echo '{"prompt":"..."}'  | claude-recall emit-prompt-context
+```
+
+Failure policy: any error → `{}` on stdout, exit 0. The hook must never
+block user prompts.
+
+### Hook command selection (init-hooks)
+
+The hook command emitted by `init-hooks` now branches on
+`inject_interventions`:
+
+- **`inject_interventions = true`** → `claude-recall emit-prompt-context
+  --__cr-managed` (Python path, supports interventions)
+- **`inject_interventions = false` (default)** → existing logic unchanged
+  (NativeAOT binary fast-path when available, .ps1/.sh fallback otherwise)
+
+Cost of the Python path: ~50ms extra startup per prompt vs the binary
+fast-path. Imperceptible at hook-firing cadence. Only paid when the
+feature is enabled.
+
+### Migration
+
+Strictly additive. No schema change, no re-embed.
+
+**Default users (most):** no action. The feature is off by default;
+existing hook setups behave identically to v0.8.x.
+
+**Opt-in path** (for the structural-intervention pattern):
+
+```bash
+# 1. Edit config.toml to enable
+echo '[hooks]\ninject_interventions = true' >> ~/.config/claude-recall/config.toml
+
+# 2. Create the interventions file in the project
+mkdir -p .claude/hooks
+echo "# Project interventions" > .claude/hooks/interventions.md
+# ... edit as needed
+
+# 3. Re-emit hooks
+claude-recall init-hooks --force
+```
+
+**For projects already hand-rolling this pattern** (ANI's
+`on_prompt.ps1` is the reference): set `inject_interventions = true`,
+run `init-hooks --force`, then delete the custom script. The managed
+hook produces the same agent-visible output as the hand-rolled version,
+including the `\n\n---\n\n` separator convention.
+
+### Tests (259 → 271, +12)
+
+Full coverage of the spec's behavior contract:
+
+- `test_emit_empty_stdin_emits_empty_json`
+- `test_emit_malformed_json_emits_empty_json`
+- `test_emit_missing_prompt_field_emits_empty_json`
+- `test_emit_omits_interventions_when_flag_false`
+- `test_emit_injects_interventions_when_flag_true_and_file_present`
+- `test_emit_falls_back_to_recall_only_when_interventions_file_missing`
+- `test_emit_blank_interventions_file_treated_as_missing`
+- `test_emit_merges_interventions_and_recall_with_separator` —
+  the load-bearing test; asserts ordering + separator
+- `test_emit_interventions_path_override_resolves_against_cwd`
+- `test_emit_accepts_managed_marker_flag_as_noop`
+- `test_init_hooks_uses_python_composer_when_inject_interventions_true`
+- `test_init_hooks_uses_binary_when_inject_interventions_false`
+
+### Cross-project pattern transfer
+
+Third deployment of the tier-separation architectural pattern:
+
+| Project | Substrate | Date |
+|---|---|---|
+| ANI Runtime | Facts / Episodic / Interior memory tiers | mid-April 2026 |
+| claude-recall v0.8 | THOUGHT / PROCEDURAL / HARNESS / TOOL_RESULT_EMBEDDED content_kind | late April 2026 |
+| claude-recall v0.9 (this release) | Interventions / Recall structural channels in additionalContext | May 2026 |
+
+When a system does retrieval over content with mixed cognitive
+functions, the right move is to classify content by function at write
+time rather than to filter at query time. Frequency-based retrieval
+amplifies the most-common content kinds and a stoplist of register-
+specific noise will never converge.
+
+[issue #29]: https://github.com/LearnedGeek/claude-recall/issues/29
+
 ## v0.8.5 — 2026-05-21
 
 `claude-recall show` accepts a unique prefix of the session_id. Closes
