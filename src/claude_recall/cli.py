@@ -162,9 +162,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     # show
     p_show = sub.add_parser("show", help="Fetch a session's full transcript.")
-    p_show.add_argument("session_id")
+    p_show.add_argument(
+        "session_id",
+        help=(
+            "Session ID. May be the full UUID or a unique prefix (the 8-char "
+            "form `list` displays works directly)."
+        ),
+    )
     p_show.add_argument("--format", choices=["json", "text"], default="text")
-    p_show.add_argument("--turns", help="Turn range, e.g. '0-20' or '-10'.")
+    # `--turn` and `--turns` are accepted equivalently. Issue #28: users
+    # naturally type --turn (singular). Previously argparse's prefix-
+    # abbreviation made --turn collapse to --turns, which worked but felt
+    # accidental. Explicit alias removes the ambiguity.
+    p_show.add_argument(
+        "--turn", "--turns", dest="turns",
+        help="Turn range, e.g. '0-20', '-10', or single turn '9493'.",
+    )
 
     # list
     p_list = sub.add_parser("list", help="Enumerate recent sessions.")
@@ -674,18 +687,51 @@ def _cmd_show(args: argparse.Namespace, cfg: Config) -> int:
         print(f"database error: {exc}", file=sys.stderr)
         return 1
     try:
-        session = conn.execute(
-            "SELECT * FROM sessions WHERE session_id = ?", (args.session_id,)
+        # Issue #28: accept either the full session_id or a unique prefix.
+        # `list` displays the 8-char prefix, and users naturally paste that
+        # into `show`. Exact match is preferred when present (lets a full
+        # UUID work even if some other session has it as its prefix).
+        sid_query = args.session_id
+        exact = conn.execute(
+            "SELECT session_id FROM sessions WHERE session_id = ?", (sid_query,)
         ).fetchone()
-        if session is None:
-            print(f"session not found: {args.session_id}", file=sys.stderr)
-            return 1
+        if exact is not None:
+            resolved_session_id = sid_query
+        else:
+            matches = conn.execute(
+                "SELECT session_id FROM sessions WHERE session_id LIKE ? "
+                "ORDER BY started_at DESC",
+                (sid_query + "%",),
+            ).fetchall()
+            if not matches:
+                print(f"session not found: {sid_query}", file=sys.stderr)
+                return 1
+            if len(matches) > 1:
+                print(
+                    f"ambiguous session_id {sid_query!r} matches "
+                    f"{len(matches)} sessions:",
+                    file=sys.stderr,
+                )
+                for m in matches[:10]:
+                    print(f"  {m['session_id']}", file=sys.stderr)
+                if len(matches) > 10:
+                    print(f"  ... and {len(matches) - 10} more", file=sys.stderr)
+                print(
+                    "Use a longer prefix to disambiguate.", file=sys.stderr
+                )
+                return 1
+            resolved_session_id = matches[0]["session_id"]
+
+        session = conn.execute(
+            "SELECT * FROM sessions WHERE session_id = ?",
+            (resolved_session_id,),
+        ).fetchone()
 
         sql = (
             "SELECT turn_index, role, content, timestamp "
             "FROM messages WHERE session_id = ? ORDER BY turn_index"
         )
-        messages = conn.execute(sql, (args.session_id,)).fetchall()
+        messages = conn.execute(sql, (resolved_session_id,)).fetchall()
         if args.turns:
             lo, hi = _parse_turn_range(args.turns, total=len(messages))
             messages = messages[lo:hi]

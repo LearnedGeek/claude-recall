@@ -2,6 +2,73 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.8.5 — 2026-05-21
+
+`claude-recall show` accepts a unique prefix of the session_id. Closes
+[issue #28].
+
+### Background
+
+`list` displays an 8-character session_id prefix in its output. Users
+naturally paste that prefix into `show`, which previously required the
+full UUID and returned an unhelpful `session not found` error. The
+inconsistency turned a clear workflow ("look at the list, drill into
+one") into a hunt for the full ID.
+
+### Behavior
+
+```bash
+claude-recall list --limit 5
+# 7e420c4f  2026-05-13  e--Documents-Work-dev-repos-AmbientNaturalIntelligence ...
+
+claude-recall show 7e420c4f                     # now works — single match resolves automatically
+claude-recall show 7e420c4f --turn 9493         # also works — single-turn lookup
+claude-recall show 7e                           # ambiguous if multiple sessions start with '7e'
+```
+
+When a prefix matches multiple sessions, the command lists all matches
+(up to 10) and asks the user to pass a longer prefix:
+
+```
+ambiguous session_id '7e' matches 4 sessions:
+  7e420c4f-7faf-4012-9012-...
+  7e8a51b3-2c4d-...
+  ...
+Use a longer prefix to disambiguate.
+```
+
+Exact-match wins over prefix-match: if the user passes a literal
+session_id that matches a row exactly, that row is used even when
+other sessions have it as their prefix. Belt-and-suspenders for users
+pasting full UUIDs who don't want collision surprises.
+
+### `--turn` alias for `--turns`
+
+The previous parser only declared `--turns`; argparse's default
+prefix-abbreviation made `--turn` work *accidentally*. Explicit alias
+removes the ambiguity:
+
+```bash
+claude-recall show <id> --turn 0-20      # range
+claude-recall show <id> --turns 0-20     # equivalent
+claude-recall show <id> --turn 9493      # single turn
+```
+
+### Tests (254 → 259)
+
+- `test_show_accepts_unique_prefix_session_id`
+- `test_show_ambiguous_prefix_lists_candidates`
+- `test_show_prefix_no_match_returns_session_not_found`
+- `test_show_exact_match_wins_over_prefix`
+- `test_show_turn_singular_alias_works`
+
+### Migration
+
+Strictly additive. Existing `show <full-uuid>` invocations behave
+identically. No schema change, no re-embed, no hook reinstall.
+
+[issue #28]: https://github.com/LearnedGeek/claude-recall/issues/28
+
 ## v0.8.4 — 2026-05-02
 
 `claude-recall reclassify` — re-run the content-kind classifier across

@@ -149,6 +149,91 @@ def test_show_turn_range_slices(cli_env):
     assert [m["turn_index"] for m in payload["messages"]] == [0, 1]
 
 
+def test_show_accepts_unique_prefix_session_id(cli_env):
+    """Issue #28: `list` displays 8-char prefix; `show` should accept it
+    when the prefix is unique."""
+    cli_env["run"]("index")
+    # The fixture session ids include 'session_short' — 'sess' or 'session_s'
+    # are unique prefixes among the test fixtures.
+    code, out, _ = cli_env["run"]("show", "session_s", "--format", "json")
+    assert code == 0
+    payload = json.loads(out)
+    assert payload["session_id"] == "session_short"
+
+
+def test_show_ambiguous_prefix_lists_candidates(cli_env, tmp_path):
+    """When a prefix matches multiple sessions, show should list them
+    and exit with a non-zero code."""
+    from claude_recall import storage
+    cli_env["run"]("index")
+    # Seed two additional sessions sharing a common prefix.
+    db_path = cli_env["db_path"]
+    conn = storage.open_db(db_path)
+    try:
+        for sid in ("ambig_a", "ambig_b"):
+            conn.execute(
+                "INSERT INTO sessions(session_id, project_slug, file_path, "
+                "file_mtime, started_at, ended_at, turn_count, indexed_at) "
+                "VALUES (?, ?, ?, 0, ?, ?, 0, ?)",
+                (sid, "test-project", f"/test/{sid}.jsonl",
+                 "2026-05-21", "2026-05-21", "2026-05-21T00:00:00Z"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    code, _, err = cli_env["run"]("show", "ambig")
+    assert code == 1
+    assert "ambiguous" in err.lower()
+    assert "ambig_a" in err
+    assert "ambig_b" in err
+
+
+def test_show_prefix_no_match_returns_session_not_found(cli_env):
+    cli_env["run"]("index")
+    code, _, err = cli_env["run"]("show", "doesnotexist")
+    assert code == 1
+    assert "session not found" in err
+
+
+def test_show_exact_match_wins_over_prefix(cli_env, tmp_path):
+    """If an exact session_id matches, use it even if other sessions
+    have it as their prefix. Belt-and-suspenders for users who do
+    paste the full UUID and don't want surprises."""
+    from claude_recall import storage
+    cli_env["run"]("index")
+    db_path = cli_env["db_path"]
+    conn = storage.open_db(db_path)
+    try:
+        # Insert two sessions: 'abc' (exact) and 'abc_long' (prefix-match candidate).
+        for sid in ("abc", "abc_long"):
+            conn.execute(
+                "INSERT INTO sessions(session_id, project_slug, file_path, "
+                "file_mtime, started_at, ended_at, turn_count, indexed_at) "
+                "VALUES (?, ?, ?, 0, ?, ?, 0, ?)",
+                (sid, "test-project", f"/test/{sid}.jsonl",
+                 "2026-05-21", "2026-05-21", "2026-05-21T00:00:00Z"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    code, out, _ = cli_env["run"]("show", "abc", "--format", "json")
+    assert code == 0
+    payload = json.loads(out)
+    assert payload["session_id"] == "abc"
+
+
+def test_show_turn_singular_alias_works(cli_env):
+    """Issue #28: `--turn` (singular) is an explicit alias for `--turns`.
+    Removes the argparse-prefix-abbreviation ambiguity."""
+    cli_env["run"]("index")
+    code, out, _ = cli_env["run"](
+        "show", "session_short", "--format", "json", "--turn", "0-1"
+    )
+    assert code == 0
+    payload = json.loads(out)
+    assert [m["turn_index"] for m in payload["messages"]] == [0, 1]
+
+
 def test_list_json(cli_env):
     cli_env["run"]("index")
     code, out, _ = cli_env["run"]("list", "--format", "json")
