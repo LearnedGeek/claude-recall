@@ -3,6 +3,6 @@
 See docs/PLAN.md for the implementation plan.
 """
 
-__version__ = "0.9.0"
+__version__ = "0.9.1"
 __author__ = "Mark McArthey"
 __license__ = "MIT"

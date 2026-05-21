@@ -1814,7 +1814,16 @@ def _cmd_init_hooks(args: argparse.Namespace, cfg: Config) -> int:
             _strip_claude_recall_commands(hooks_block, event)
 
     if session_start_cmd is not None:
-        _merge_hook(hooks_block, "SessionStart", session_start_cmd, matcher="startup|resume")
+        # Issue #14 (v0.9.1): also include the `compact` matcher so the
+        # SessionStart hook fires before Claude Code rewrites the JSONL
+        # in-place during /compact. Without this, in-flight session content
+        # from earlier in the same session is lost to our index when
+        # compaction triggers — the JSONL gets summarized away before our
+        # next normal `claude-recall index` pass picks it up.
+        _merge_hook(
+            hooks_block, "SessionStart", session_start_cmd,
+            matcher="startup|resume|compact",
+        )
     _merge_hook(hooks_block, "UserPromptSubmit", on_prompt_cmd, matcher=None)
 
     # Issue #26 (v0.6.8): emit the time-injection hook when opted in via

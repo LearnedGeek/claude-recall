@@ -2,6 +2,54 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.9.1 — 2026-05-21
+
+Closes [issue #14] — long-open "pre-compact hook" enhancement from
+April 25. The SessionStart hook matcher now includes `compact` in
+addition to `startup|resume`, so `claude-recall index` fires before
+Claude Code rewrites the JSONL in-place during `/compact`.
+
+### Background
+
+Claude Code writes session turns to `~/.claude/projects/<slug>/<uuid>.jsonl`
+incrementally. When `/compact` triggers, the JSONL is rewritten **in
+place** — earlier turns are replaced with a compacted summary. Without
+our hook firing first, the pre-compact content (which may include the
+load-bearing decisions or reasoning the user wants the agent to
+remember next prompt) is summarized away before claude-recall's next
+indexing pass sees it.
+
+### What changed
+
+`init-hooks` now registers SessionStart with:
+
+```json
+"matcher": "startup|resume|compact"
+```
+
+instead of just `"startup|resume"`. The existing `session_start.ps1` /
+`session_start.sh` script runs the same incremental `claude-recall index`
+against the project. No new script files; no behavior change to the
+hook body — only the trigger surface widens.
+
+Closes the gap from PLAN §12 ("Known v0.1 gaps"): *the in-flight
+session's `.jsonl` is no longer skipped past the moment compaction
+fires.*
+
+### Test (272 → 273)
+
+- `test_init_hooks_session_start_includes_compact_matcher` — asserts
+  the emitted matcher contains all three triggers.
+
+### Migration
+
+Strictly additive. Existing installs need a one-time
+`claude-recall init-hooks --force` to pick up the new matcher; without
+that, the old `startup|resume` matcher remains and the `compact` case
+keeps falling through the gap.
+
+[issue #14]: https://github.com/LearnedGeek/claude-recall/issues/14
+
 ## v0.9.0 — 2026-05-21
 
 **Structural intervention injection in the UserPromptSubmit hook.** Closes

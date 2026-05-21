@@ -1157,6 +1157,42 @@ def test_init_hooks_idempotent(tmp_path):
     assert len(settings["hooks"]["UserPromptSubmit"]) == 1
 
 
+def test_init_hooks_session_start_includes_compact_matcher(tmp_path):
+    """Issue #14 (v0.9.1): the SessionStart hook matcher includes 'compact'
+    so the indexer fires before Claude Code rewrites the JSONL in-place
+    during /compact. Without this, in-flight session content from earlier
+    in the same session is lost to our index when compaction triggers."""
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    code = cli.main(["init-hooks", "--project-root", str(project_root)])
+    assert code == 0
+
+    settings = json.loads(
+        (project_root / ".claude" / "settings.json").read_text(encoding="utf-8")
+    )
+    ss_entries = settings["hooks"]["SessionStart"]
+    # Find the entry containing claude-recall's session_start command.
+    cr_entry = None
+    for entry in ss_entries:
+        for h in entry.get("hooks", []):
+            cmd = h.get("command", "")
+            if "session_start" in cmd:
+                cr_entry = entry
+                break
+        if cr_entry:
+            break
+    assert cr_entry is not None, "claude-recall SessionStart hook not registered"
+    matcher = cr_entry.get("matcher", "")
+    assert "compact" in matcher, (
+        f"SessionStart matcher missing 'compact' trigger: {matcher!r}. "
+        f"Without this, /compact rewrites the JSONL before claude-recall "
+        f"indexes the pre-compact state."
+    )
+    # Existing triggers must remain so SessionStart still fires on startup/resume.
+    assert "startup" in matcher
+    assert "resume" in matcher
+
+
 def test_init_hooks_force_preserves_user_added_sibling_commands(tmp_path):
     """Issue #20: --force must not destroy user-added sibling commands
     composed alongside the claude-recall hook within the same matcher
