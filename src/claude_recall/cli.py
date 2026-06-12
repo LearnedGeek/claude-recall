@@ -297,6 +297,45 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # orphan-slugs (v0.11.0)
+    p_orphan = sub.add_parser(
+        "orphan-slugs",
+        help=(
+            "Detect claude-recall slug archives whose source project path "
+            "is missing (potential data-loss risk if a backup gets cleaned)."
+        ),
+    )
+    p_orphan.add_argument(
+        "--projects-json",
+        help=(
+            "Path to a VSCode Project Manager projects.json file. "
+            "Auto-detects %%APPDATA%%/Code/User/globalStorage/"
+            "alefragnani.project-manager/projects.json if present."
+        ),
+    )
+    p_orphan.add_argument(
+        "--path", action="append", default=[], metavar="PATH",
+        help="Expected project path (repeatable). Use to declare projects not in projects.json.",
+    )
+    p_orphan.add_argument(
+        "--projects-root", action="append", default=[], metavar="ROOT",
+        help=(
+            "Directory whose immediate children are projects (repeatable). "
+            "Useful when you don't use Project Manager (e.g., 'e:/dev/work')."
+        ),
+    )
+    p_orphan.add_argument(
+        "--no-auto-projects-json", action="store_true",
+        help="Skip the auto-detected Project Manager projects.json even if present.",
+    )
+    p_orphan.add_argument(
+        "--old-style-marker", action="append", default=None, metavar="MARKER",
+        help=(
+            "Path-segment name that marks a pre-migration slug (repeatable). "
+            "Default: 'Documents'. Override to customize for other migration shapes."
+        ),
+    )
+
     # scrub-images (v0.10.0)
     p_scrub = sub.add_parser(
         "scrub-images",
@@ -398,6 +437,7 @@ def main(argv: list[str] | None = None) -> int:
         "emit-prompt-context": _cmd_emit_prompt_context,
         "doctor": _cmd_doctor,
         "scrub-images": _cmd_scrub_images,
+        "orphan-slugs": _cmd_orphan_slugs,
     }
     return handlers[args.command](args, cfg)
 
@@ -817,6 +857,39 @@ def _cmd_scrub_images(args: argparse.Namespace, cfg: Config) -> int:
         backup=not args.no_backup,
     )
     print(_scrub.format_report(report, dry_run=args.dry_run))
+    return 0
+
+
+# --- orphan-slugs -----------------------------------------------------------
+
+def _cmd_orphan_slugs(args: argparse.Namespace, cfg: Config) -> int:
+    """Detect orphan/missing slug archives. Exit code reflects severity."""
+    from . import orphan_slugs as _orphan
+
+    projects_json: Path | None
+    if args.projects_json:
+        projects_json = Path(args.projects_json).expanduser()
+    elif args.no_auto_projects_json:
+        projects_json = None
+    else:
+        projects_json = _orphan.default_projects_json_path()
+
+    explicit = [Path(p).expanduser() for p in args.path]
+    roots = [Path(p).expanduser() for p in args.projects_root]
+    markers = args.old_style_marker or _orphan.DEFAULT_OLD_STYLE_MARKERS
+
+    report = _orphan.run_orphan_check(
+        cfg.archive_root,
+        projects_json=projects_json,
+        explicit_paths=explicit,
+        projects_roots=roots,
+        old_style_markers=markers,
+    )
+    print(_orphan.format_report(report))
+    if report.has_errors:
+        return 2
+    if report.has_warnings:
+        return 1
     return 0
 
 
