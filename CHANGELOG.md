@@ -2,6 +2,104 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.11.0 — 2026-06-12
+
+`claude-recall orphan-slugs` — detect claude-recall slug archives whose
+source project path no longer exists, and flag pre-migration slugs
+that have a live successor so the history can be merged with
+`claude-recall migrate` before it's stranded.
+
+### Background
+
+The motivating incident: on 2026-06-11 OC discovered that
+strictlyelvisshow's Claude Code resume picker was empty — the project
+had been actively used since March, but the May 26 bulk-migration
+script had a gap and never moved its slug archive forward. The sessions
+sat in `~/.claude/projects/e--Documents-Work-strictlyelvisshow/` while
+all new sessions landed under `e--dev-work-strictlyelvisshow/`. The
+following day's disk cleanup deleted the May 26 migration backup —
+the only remaining copy. The sessions were recovered from Backblaze
+the same afternoon, but the failure mode was preventable: an
+"orphan slug with a live successor" is exactly the shape a periodic
+sanity-check should catch before any backup gets cleaned.
+
+`claude-recall orphan-slugs` is that sanity-check.
+
+### What it catches
+
+Three categories of finding, with severity reflected in the exit code:
+
+- **`pre_migration_slug` (ERROR, exit 2)** — an orphan slug whose
+  source path uses a pre-migration prefix (default: contains
+  `Documents`) AND a live slug exists that looks like the
+  post-migration successor (matched by trailing project-name
+  segment). These are the actionable case: print the exact
+  `claude-recall migrate --from X --to Y` command needed to merge
+  the history into the live slug.
+- **`orphan_slug` (WARN, exit 1)** — a filesystem slug whose
+  inferred source path doesn't exist and no obvious successor is
+  apparent. Sessions are intact but unreachable from any current
+  project location. Decision left to the user (keep for history,
+  delete, or manually migrate to a successor they know).
+- **`missing_slug` (OK, exit 0)** — an expected project path with
+  no archive directory yet. Informational only — Claude Code
+  creates the slug directory on first session.
+
+### Usage
+
+```bash
+# Auto-detect Project Manager projects.json on Windows.
+claude-recall orphan-slugs
+
+# Declare project roots explicitly (e.g., 'e:/dev/work').
+claude-recall orphan-slugs \
+  --projects-root e:/dev/work \
+  --projects-root e:/dev/personal \
+  --projects-root e:/dev/school
+
+# Point at an explicit projects.json file.
+claude-recall orphan-slugs --projects-json /path/to/projects.json
+
+# Mix individual paths with roots.
+claude-recall orphan-slugs --path e:/dev/work/CrewTrack --path e:/dev/personal/Manuscript-FULL
+
+# Customize the "pre-migration marker" if your slug history uses a
+# different path-segment convention.
+claude-recall orphan-slugs --old-style-marker MyOldRoot
+```
+
+### Detection details
+
+- **Reverse-slug parsing** is best-effort: the slug format collapses
+  `:`, `\`, and `/` all to `-`, so reverse is lossy when path
+  segments contain dashes literally (e.g., `kevin-laptop-case`).
+  The detector still flags these correctly when paired with an
+  expected-paths input that includes the live path.
+- **Pre-migration marker** defaults to `Documents` (matching the
+  pre-May-26 path convention in the SES incident). Configurable
+  via `--old-style-marker` (repeatable).
+- **Successor matching** uses the last path segment as the anchor:
+  e.g. `e--Documents-Work-strictlyelvisshow` matches any live slug
+  ending in `-strictlyelvisshow`. Successor candidates include both
+  filesystem slugs and slugs derived from expected paths (so a
+  pre-migration slug can match a yet-to-be-created successor).
+- **Expected-paths inputs** are taken from three places, all
+  optional: `--projects-json`, `--path`, `--projects-root`. Without
+  any input, the command runs in filesystem-only mode (every slug
+  must reverse-resolve to an existing path; otherwise it's
+  flagged).
+
+### What it doesn't do
+
+- Doesn't auto-migrate. The recommended `claude-recall migrate`
+  command is printed; the user runs it. Auto-migration could merge
+  the wrong history if the successor heuristic is wrong.
+- Doesn't detect orphans whose source path uses an unusual encoding
+  Claude Code applies but `slug_from_path` doesn't (e.g., the dot
+  collapse in `SkullUp\com.efun.euklqb` may produce a slug that
+  this tool can't reverse cleanly). Workaround: pass the live path
+  via `--path` so it's matched directly.
+
 ## v0.10.0 — 2026-06-11
 
 `claude-recall scrub-images` — replace oversized image content blocks
