@@ -2,6 +2,101 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## v0.10.0 — 2026-06-11
+
+`claude-recall scrub-images` — replace oversized image content blocks
+in session jsonls with text placeholders. Unblocks sessions rejected
+by the Anthropic many-image dimension limit (2000px) without
+abandoning the conversation.
+
+### Background
+
+The Anthropic API enforces a 2000px-on-any-dimension limit when a
+conversation has multiple images. Once an oversized image lands in a
+session transcript, every subsequent request fails with:
+
+> An image in the conversation exceeds the dimension limit for
+> many-image requests (2000px). Start a new session with fewer images.
+
+The error message's suggested fix — start a new session — drops the
+conversation context. For a long-running session that's a real cost.
+
+OC hit this exactly during a PhysicianAssistant session on 2026-06-11
+after two tool-result screenshots came back at 2048x2048. The session
+was wedged; manual surgical editing of the jsonl unblocked it. That
+manual procedure is the implementation reference for this command.
+
+### What `scrub-images` does
+
+```bash
+# Scope to the current project (default behavior — derives slug from cwd).
+claude-recall scrub-images
+
+# Scope to a specific project, or 'all' projects.
+claude-recall scrub-images --project e--dev-work-PhysicianAssistant
+claude-recall scrub-images --project all
+
+# Limit to one session by UUID prefix.
+claude-recall scrub-images --session 69811251
+
+# Preview without writing.
+claude-recall scrub-images --dry-run
+
+# Override thresholds.
+claude-recall scrub-images --max-dim 1500 --max-bytes 1048576
+```
+
+The command walks every session jsonl in scope, base64-decodes image
+content blocks (including those nested inside `tool_result` blocks),
+reads PNG/JPEG dimensions and byte size, and for each image that
+exceeds either threshold:
+
+- Replaces the image block in place with a text block reading
+  `[image removed by claude-recall scrub-images: WxH (N bytes)
+  exceeded limits (...)]`.
+- Preserves the enclosing `tool_result` / `message.content`
+  structure so `tool_use_id` linkage stays intact (no orphan
+  tool_use blocks; resume works without API rejection).
+- Blanks `toolUseResult.file.base64` (Claude Code metadata, not part
+  of the API conversation) to free up disk in addition to fixing
+  the API rejection.
+
+### Safety
+
+- A `.bak.<timestamp>` sidecar is written before any modification.
+  Skip with `--no-backup` if you don't want the disk overhead.
+- Writes are atomic (temp file then `os.replace`).
+- Idempotent: the canonical placeholder is detected on subsequent
+  runs and skipped, so re-running is safe.
+- `--dry-run` reports findings without touching any file.
+
+### Detection details
+
+- PNG dimensions read from the IHDR chunk (bytes 16-24, big-endian
+  uint32 pair). The PNG signature (`\x89PNG\r\n\x1a\n`) gates the
+  parse to avoid mis-identifying other formats.
+- JPEG dimensions read from the first SOFn marker (excluding DHT
+  0xC4, DAC 0xCC, DNL 0xC8 which share the SOFn marker range but
+  are not start-of-frame).
+- Other image formats (GIF, WebP, etc.) are not currently parsed
+  for dimensions but will be caught by the `--max-bytes` threshold.
+
+### Threshold defaults
+
+- `--max-dim 2000` — matches Anthropic's many-image limit as of
+  June 2026.
+- `--max-bytes 5242880` (5 MiB) — generous default. Tighten if a
+  particular session has bytes-heavy images near but under 2000px.
+
+### What `scrub-images` does NOT do
+
+- Does not re-index the session in claude-recall's DB. The indexer
+  already tolerates jsonl edits — re-run `claude-recall index` if
+  you want to reflect the scrubbed state in the search index.
+- Does not delete entire turns. The substitution preserves
+  conversation structure rather than removing the turn outright,
+  which is safer for resume.
+
 ## v0.9.2 — 2026-05-21
 
 `claude-recall doctor` — diagnose hook wiring drift in

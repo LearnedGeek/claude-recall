@@ -297,6 +297,46 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # scrub-images (v0.10.0)
+    p_scrub = sub.add_parser(
+        "scrub-images",
+        help=(
+            "Replace oversized images in session jsonls with text "
+            "placeholders. Unblocks sessions rejected by the Anthropic "
+            "many-image dimension limit (2000px)."
+        ),
+    )
+    p_scrub.add_argument(
+        "--project",
+        help=(
+            "Scope to one project slug (default: derive from the current "
+            "directory; pass 'all' to scan every project)."
+        ),
+    )
+    p_scrub.add_argument(
+        "--session",
+        help=(
+            "Limit to sessions whose UUID stem starts with this prefix "
+            "(e.g. '69811251'). Combine with --project to scope tightly."
+        ),
+    )
+    p_scrub.add_argument(
+        "--max-dim", type=int, default=2000,
+        help="Pixel dimension threshold (default: 2000, per Anthropic many-image limit).",
+    )
+    p_scrub.add_argument(
+        "--max-bytes", type=int, default=5 * 1024 * 1024,
+        help="Byte-size threshold for individual images (default: 5 MiB).",
+    )
+    p_scrub.add_argument(
+        "--dry-run", action="store_true",
+        help="Report findings without modifying any files.",
+    )
+    p_scrub.add_argument(
+        "--no-backup", action="store_true",
+        help="Skip the .bak.<timestamp> sidecar that's written before any modification.",
+    )
+
     # reclassify (v0.8.4)
     p_reclassify = sub.add_parser(
         "reclassify",
@@ -357,6 +397,7 @@ def main(argv: list[str] | None = None) -> int:
         "reclassify": _cmd_reclassify,
         "emit-prompt-context": _cmd_emit_prompt_context,
         "doctor": _cmd_doctor,
+        "scrub-images": _cmd_scrub_images,
     }
     return handlers[args.command](args, cfg)
 
@@ -742,6 +783,40 @@ def _cmd_doctor(args: argparse.Namespace, cfg: Config) -> int:
         return 2
     if report.has_warnings:
         return 1
+    return 0
+
+
+# --- scrub-images -----------------------------------------------------------
+
+def _cmd_scrub_images(args: argparse.Namespace, cfg: Config) -> int:
+    """Replace oversized image content in session jsonls.
+
+    Project scoping:
+    - ``--project all`` walks every project under the archive root.
+    - ``--project <slug>`` walks only that project's archive directory.
+    - Otherwise, derive the slug from cwd via ``projects.slug_from_path``.
+    """
+    from . import scrub_images as _scrub
+    from . import projects as _projects
+
+    project_slug: str | None
+    if args.project == "all":
+        project_slug = None
+    elif args.project:
+        project_slug = args.project
+    else:
+        project_slug = _projects.slug_from_path(Path.cwd().absolute())
+
+    report = _scrub.run_scrub(
+        cfg.archive_root,
+        project_slug=project_slug,
+        session_id_prefix=args.session,
+        max_dim_px=args.max_dim,
+        max_bytes=args.max_bytes,
+        dry_run=args.dry_run,
+        backup=not args.no_backup,
+    )
+    print(_scrub.format_report(report, dry_run=args.dry_run))
     return 0
 
 
