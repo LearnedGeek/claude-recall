@@ -16,7 +16,7 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
 @pytest.fixture
-def cli_env(tmp_path, monkeypatch, capsys):
+def cli_env(tmp_path, monkeypatch, capsys, frozen_search_clock):
     """Populate a full CLI environment: config file, archive dir, db path."""
     archive_root = tmp_path / "archive"
     project = archive_root / "test-project"
@@ -2108,6 +2108,7 @@ def test_status_embeddings_ready_false_when_ollama_down(tmp_path, capsys, monkey
     assert payload["checks"]["embeddings_ready"] is False
 
 
+@pytest.mark.usefixtures("frozen_search_clock")
 def test_semantic_from_config_respects_use_in_hook(tmp_path, capsys, monkeypatch):
     """--semantic-from-config activates semantic only when use_in_hook=true in config."""
     archive_root = _seed_archive(tmp_path)
@@ -2160,6 +2161,7 @@ def test_semantic_from_config_respects_use_in_hook(tmp_path, capsys, monkeypatch
     assert any(r.get("semantic_rank") is not None for r in payload["results"])
 
 
+@pytest.mark.usefixtures("frozen_search_clock")
 def test_search_semantic_soft_ignores_when_disabled(tmp_path, capsys):
     """--semantic without [embeddings].enabled logs a warning and runs FTS5-only."""
     archive_root = _seed_archive(tmp_path)
@@ -2184,6 +2186,7 @@ def test_search_semantic_soft_ignores_when_disabled(tmp_path, capsys):
     assert payload["total_matches"] >= 1
 
 
+@pytest.mark.usefixtures("frozen_search_clock")
 def test_search_semantic_reranks_end_to_end(tmp_path, capsys, monkeypatch):
     """With embeddings enabled + Ollama fake + vectors seeded, --semantic flips ranks."""
     import numpy as np

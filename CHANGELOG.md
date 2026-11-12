@@ -2,7 +2,18 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
-## v0.11.1 — 2026-11-11
+## v0.11.2 — 2026-11-11
+
+Test-suite fix only; no runtime change. The v0.11.1 tag's CI run failed 25
+search tests because their fixtures carry fixed April-2026 timestamps and
+`run_search` defaults to a 90-day window from the real clock, so they began
+returning zero hits once that window passed. Those tests now pin search's
+clock to 2026-04-23 via a `frozen_search_clock` fixture. v0.11.1 was never
+published (its build stopped at the test step); v0.11.2 is the first tagged
+release containing the changes below, plus v0.10.0 and v0.11.0, which were
+merged in June but never tagged.
+
+## v0.11.1 — 2026-11-11 (tag exists, never published)
 
 ### Changed (behavior) — keep index rows when a transcript file vanishes
 

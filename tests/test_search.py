@@ -12,7 +12,7 @@ from claude_recall import indexer, search
 
 
 @pytest.fixture
-def indexed_db(archive_dir, db_conn):
+def indexed_db(archive_dir, db_conn, frozen_search_clock):
     """DB indexed against the fixture archive."""
     indexer.run_index(db_conn, archive_dir)
     return db_conn

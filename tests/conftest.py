@@ -54,6 +54,30 @@ def _isolate_config_from_dev_machine(monkeypatch):
 
 
 @pytest.fixture
+def frozen_search_clock(monkeypatch):
+    """Pin search's "now" to 2026-04-23, the date the fixture data was written.
+
+    The fixtures carry fixed April-2026 timestamps and `run_search` defaults
+    to a 90-day window measured from the real clock, so without this the
+    tests silently start returning zero hits once the window passes. Request
+    it only from tests that rely on the fixed fixture dates; tests that build
+    timestamps relative to the real clock should not use it.
+    """
+    from datetime import UTC, datetime
+
+    from claude_recall import search as _search
+
+    frozen = datetime(2026, 4, 23, tzinfo=UTC)
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen if tz is None else frozen.astimezone(tz)
+
+    monkeypatch.setattr(_search, "datetime", _FrozenDatetime)
+
+
+@pytest.fixture
 def archive_dir(tmp_path: Path) -> Path:
     """Temporary archive root with a single project subdir containing sample fixtures.
 

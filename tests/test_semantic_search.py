@@ -17,7 +17,7 @@ from claude_recall import embeddings, indexer, search, storage
 
 
 @pytest.fixture
-def tiny_indexed_db(tmp_path):
+def tiny_indexed_db(tmp_path, frozen_search_clock):
     """DB with three short user messages whose BM25 and semantic order can diverge."""
     archive = tmp_path / "archive"
     (archive / "proj").mkdir(parents=True)
@@ -188,7 +188,7 @@ def test_semantic_partial_vector_coverage(tiny_indexed_db):
 
 
 @pytest.fixture
-def multi_project_indexed_db(tmp_path):
+def multi_project_indexed_db(tmp_path, frozen_search_clock):
     """DB with 5 messages spread across 3 projects, all matching 'cascade'.
 
     proj-A: 3 messages
