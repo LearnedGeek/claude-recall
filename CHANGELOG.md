@@ -2,7 +2,7 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
-## Unreleased
+## v0.11.1 — 2026-11-11
 
 ### Changed (behavior) — keep index rows when a transcript file vanishes
 
