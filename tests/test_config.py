@@ -16,6 +16,7 @@ def test_defaults_when_file_missing(tmp_path):
     assert cfg.db_path == default.db_path
     assert cfg.search.hook_threshold == default.search.hook_threshold
     assert cfg.indexing.index_tool_blocks is False
+    assert cfg.indexing.sweep_orphans is False
     assert cfg.embeddings.enabled is False
 
 
@@ -38,6 +39,7 @@ hook_days = 14
 
 [indexing]
 index_tool_blocks = true
+sweep_orphans = true
 
 [embeddings]
 enabled = true
@@ -54,6 +56,7 @@ model = "other-model"
     assert cfg.search.max_injected_tokens == 1500
     assert cfg.search.hook_days == 14
     assert cfg.indexing.index_tool_blocks is True
+    assert cfg.indexing.sweep_orphans is True
     assert cfg.embeddings.enabled is True
     assert cfg.embeddings.ollama_base_url == "http://localhost:9999"
     assert cfg.embeddings.model == "other-model"

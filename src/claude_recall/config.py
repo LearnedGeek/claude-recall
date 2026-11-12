@@ -24,6 +24,11 @@ class SearchConfig:
 @dataclass
 class IndexingConfig:
     index_tool_blocks: bool = False
+    # When false (default), a session whose transcript file has vanished from
+    # disk keeps its index rows, messages, and vectors: the index is the only
+    # surviving copy once Claude Code's own cleanup removes the JSONL. Set true
+    # to restore the pre-fix behavior of deleting those rows (issue #17).
+    sweep_orphans: bool = False
 
 
 @dataclass
@@ -141,6 +146,10 @@ def _load_toml(path: Path) -> Config:
     tool_blocks = _dig(data, "indexing", "index_tool_blocks")
     if tool_blocks is not None:
         cfg.indexing.index_tool_blocks = bool(tool_blocks)
+
+    sweep_orphans = _dig(data, "indexing", "sweep_orphans")
+    if sweep_orphans is not None:
+        cfg.indexing.sweep_orphans = bool(sweep_orphans)
 
     for field_name in (
         "enabled",

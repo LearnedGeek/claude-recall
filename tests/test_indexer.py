@@ -932,7 +932,7 @@ def test_orphan_session_sweep_removes_deleted_files(archive_dir, db_conn):
     target = archive_dir / "test-project" / "session_short.jsonl"
     target.unlink()
 
-    report = indexer.run_index(db_conn, archive_dir)
+    report = indexer.run_index(db_conn, archive_dir, sweep_orphans=True)
     assert report.deleted_sessions == 1
     assert _session_count(db_conn) == 2
     assert _message_count(db_conn) == initial_msgs - 5
@@ -970,7 +970,7 @@ def test_orphan_sweep_scoped_to_walked_projects(archive_dir, db_conn):
     (archive_dir / "test-project" / "session_short.jsonl").unlink()
 
     report = indexer.run_index(
-        db_conn, archive_dir, project_slug="test-project"
+        db_conn, archive_dir, project_slug="test-project", sweep_orphans=True
     )
     assert report.deleted_sessions == 1, (
         "scoped sweep should delete exactly the test-project orphan, not "
@@ -983,6 +983,52 @@ def test_orphan_sweep_scoped_to_walked_projects(archive_dir, db_conn):
         ("other-project",),
     ).fetchone()[0]
     assert other_count == 1
+
+
+def test_missing_transcript_keeps_rows_by_default(archive_dir, db_conn):
+    """Default: a vanished JSONL leaves its session, messages, and vectors in
+    the index. The index is the only surviving copy once Claude Code's own
+    cleanup removes the transcript.
+    """
+    indexer.run_index(db_conn, archive_dir)
+    initial_msgs = _message_count(db_conn)
+    _seed_dummy_vectors(db_conn, "session_short")
+
+    (archive_dir / "test-project" / "session_short.jsonl").unlink()
+
+    report = indexer.run_index(db_conn, archive_dir)
+    assert report.deleted_sessions == 0
+    assert report.archived_sessions == 1
+    assert _session_count(db_conn) == 3
+    assert _message_count(db_conn) == initial_msgs
+    assert _message_count(db_conn, "session_short") == 5
+    assert db_conn.execute(
+        "SELECT COUNT(*) FROM message_vectors"
+    ).fetchone()[0] == 5
+
+
+def test_restored_transcript_reattaches_to_kept_rows(archive_dir, db_conn):
+    """A transcript restored after its file vanished re-indexes onto the kept
+    rows: no duplicate messages, vectors survive.
+    """
+    target = archive_dir / "test-project" / "session_short.jsonl"
+    original = target.read_bytes()
+
+    indexer.run_index(db_conn, archive_dir)
+    initial_msgs = _message_count(db_conn)
+    _seed_dummy_vectors(db_conn, "session_short")
+
+    target.unlink()
+    indexer.run_index(db_conn, archive_dir)
+
+    target.write_bytes(original)
+    report = indexer.run_index(db_conn, archive_dir)
+    assert report.archived_sessions == 0
+    assert _session_count(db_conn) == 3
+    assert _message_count(db_conn) == initial_msgs
+    assert db_conn.execute(
+        "SELECT COUNT(*) FROM message_vectors"
+    ).fetchone()[0] == 5
 
 
 def test_full_lifecycle_index_embed_append_index_preserves_coverage(

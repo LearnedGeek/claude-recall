@@ -465,6 +465,7 @@ def _cmd_index(args: argparse.Namespace, cfg: Config) -> int:
             project_slug=args.project,
             rebuild=args.rebuild,
             index_tool_blocks=cfg.indexing.index_tool_blocks,
+            sweep_orphans=cfg.indexing.sweep_orphans,
             verbose=args.verbose,
         )
     except indexer.IndexerError as exc:
@@ -2166,6 +2167,7 @@ CONFIG_TEMPLATE = '''# claude-recall configuration
 
 # [indexing]
 # index_tool_blocks = false
+# sweep_orphans     = false   # true = delete index rows when a transcript file vanishes
 
 # [hooks]
 # inject_time = false                     # When true, init-hooks installs an

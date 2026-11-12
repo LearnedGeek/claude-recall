@@ -2,6 +2,29 @@
 
 All notable changes to `claude-recall`. Format: one section per tag.
 
+## Unreleased
+
+### Changed (behavior) — keep index rows when a transcript file vanishes
+
+`run_index()` no longer deletes a session's rows when its JSONL is missing
+from disk. The sweep added for [#17](https://github.com/LearnedGeek/claude-recall/issues/17)
+treated a missing file as stale data, but Claude Code's own transcript
+cleanup (`cleanupPeriodDays`, default 30) removes JSONLs in bulk, and at
+that point the index is the only surviving copy. Between 2026-09-05 and
+2026-10-12 the sweep took the index from 1608 to 784 sessions after
+transcripts disappeared, erasing history that was otherwise searchable.
+
+- New `[indexing] sweep_orphans` (default `false`). Set `true` to restore the
+  old delete-on-missing behavior.
+- `IndexReport.archived_sessions` counts rows kept because their file is
+  missing; `index --verbose` prints it.
+- Restoring a transcript to its original path re-attaches to the kept rows
+  (hash-diff, no duplicate messages, vectors preserved).
+
+Not changed: `index --rebuild` still deletes and re-inserts a walked
+project's sessions from files on disk, so it drops any archived rows whose
+transcripts are gone. Snapshot `index.db` before using it on such projects.
+
 ## v0.11.0 — 2026-06-12
 
 `claude-recall orphan-slugs` — detect claude-recall slug archives whose

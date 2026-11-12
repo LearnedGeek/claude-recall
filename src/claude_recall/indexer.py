@@ -35,6 +35,7 @@ class IndexReport:
     unchanged_sessions: int = 0
     incremental_sessions: int = 0
     deleted_sessions: int = 0
+    archived_sessions: int = 0
     total_messages: int = 0
     malformed_lines: int = 0
     elapsed_seconds: float = 0.0
@@ -51,6 +52,7 @@ def run_index(
     rebuild: bool = False,
     index_tool_blocks: bool = False,
     verbose: bool = False,
+    sweep_orphans: bool = False,
 ) -> IndexReport:
     """Index (or re-index) the archive, returning a summary report.
 
@@ -102,10 +104,13 @@ def run_index(
                 report=report,
             )
 
-    # Issue #17: sweep orphan sessions whose JSONL files are gone from disk.
-    # Scoped to the projects we just walked so `--project foo` doesn't delete
-    # rows from project bar. The FK CASCADE from sessions.session_id handles
-    # messages and message_vectors cleanup automatically.
+    # Issue #17: optionally sweep orphan sessions whose JSONL files are gone
+    # from disk. Off by default: when Claude Code's own transcript cleanup
+    # removes a JSONL, this index is the only surviving copy of that history
+    # (the 2026-09/10 incident took the index from 1608 to 784 sessions), so
+    # deleting the rows destroys it. Scoped to the projects we just walked so
+    # `--project foo` doesn't delete rows from project bar. The FK CASCADE from
+    # sessions.session_id handles messages and message_vectors cleanup.
     walked_slugs = [pdir.name for pdir in project_dirs]
     if walked_slugs:
         placeholders = ",".join("?" for _ in walked_slugs)
@@ -119,7 +124,7 @@ def run_index(
             for row in candidates
             if not Path(row["file_path"]).is_file()
         ]
-        if to_delete:
+        if to_delete and sweep_orphans:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 ph = ",".join("?" for _ in to_delete)
@@ -136,6 +141,14 @@ def run_index(
                 print(
                     f"[indexer] cleaned up {len(to_delete)} orphan session(s) "
                     f"with missing JSONL files",
+                    file=sys.stderr,
+                )
+        elif to_delete:
+            report.archived_sessions = len(to_delete)
+            if verbose:
+                print(
+                    f"[indexer] kept {len(to_delete)} session(s) in the index "
+                    f"whose JSONL files are missing (sweep_orphans is off)",
                     file=sys.stderr,
                 )
 
